@@ -1,61 +1,78 @@
-# tools —— 解码（明文化）与对齐校验脚本
+# tools —— 解码（明文化）、对齐与自动同步
 
-这套脚本把上游压缩内核还原成可读代码，并**用机器证明**还原过程没有改动逻辑。
-四个脚本都是纯本地、无网络（除 `npm install` 依赖外），Node 22 运行。
+这套脚本把上游压缩内核还原成可读代码，**用机器证明**还原没有改动逻辑，并在每周自动同步上游。
+纯本地、无网络（除 `npm install` 依赖外），Node 22 运行。
 
 ```powershell
 cd tools
 npm install          # @babel/parser / traverse / generator（精确版本，保证输出稳定）
 ```
 
-## 三个文件的关系
+## 文件关系
 
 ```
 _worker.js  ──prettier──▶  _worker.pretty.js  ──deobfuscate──▶  plain/_worker.js
- (压缩产物，上游发布)        (行号基准，还原脚本的输入)            (明文化版本，可部署)
-                                        ▲
-                              NAMES / COMMENTS 以「行号」为键对齐
+ (压缩产物，上游发布)        (行号基准)                          (明文化版本，可部署)
+                                    ▲
+                       names.json / comments.json（键=行号）
+                                    ▲
+                         align.mjs：上游升级后自动平移行号
 ```
 
-`NAMES` 的键是 **`_worker.pretty.js` 里的行号**，值是新名字；`COMMENTS` 同理。
-之所以用行号当锚点：压缩产物只有 2 行，prettier 格式化后每个函数/声明各占稳定的一行起头，
-行号天然唯一，人工核对和 `git diff` 都直观。改名本身交给 babel 的作用域分析（`scope.rename`），
-不做文本替换，因此不会碰上同名遮蔽、字符串误替换之类的问题。
+`names.json` 的键是 **`_worker.pretty.js` 里的行号**，值是新名字；`comments.json` 同理。
+用行号当锚点是因为压缩产物只有 2 行，prettier 格式化后每个函数/声明各占稳定的一行起头，
+行号天然唯一，人工核对和 `git diff` 都直观。改名交给 babel 的作用域分析（`scope.rename`），
+不做文本替换，所以不会碰到同名遮蔽、字符串误替换之类的问题。
 
 ## 脚本清单
 
 | 脚本 | 作用 |
 | --- | --- |
-| `deobfuscate.mjs` | 读取 `_worker.pretty.js`，按 `NAMES` 做**作用域安全**重命名、按 `COMMENTS` 插注释，生成 `plain/_worker.js`；结束时报告命名覆盖率，未命名的函数逐条列出（L行号 + 原始短名），方便上游发新版时补映射 |
-| `verify-alpha.mjs` | **对齐校验**：把两份源码的所有绑定按声明顺序改名为 `c0、c1…`，抹掉注释/位置/字面量写法后逐字符比较。一致即证明「只有名字不同，语义严格相同」 |
-| `skeleton.mjs` | 打印顶层结构（函数/常量、参数、行号、体积、首行摘要），起名时先看这个 |
+| `deobfuscate.mjs` | 读 `_worker.pretty.js` + `names.json` + `comments.json`，做**作用域安全**重命名并插注释，生成 `plain/_worker.js`；结束时报告命名覆盖率，未命名的函数逐条列出（L行号 + 原始短名） |
+| `align.mjs` | **上游升级后的自动对齐**：给新旧两版每个实体（导入项/模块常量/函数）算结构指纹（抹掉标识符、剔除内层函数），对新旧序列做 LCS，把旧名字平移到新行号；无法匹配的新函数进报告待人工命名 |
+| `verify-alpha.mjs` | **等价校验**：两份源码所有绑定统一改名为 `c0、c1…`，抹掉注释/位置/字面量写法后逐字符比较。一致即证明「只有名字不同，语义严格相同」 |
+| `make-simulated.mjs` | 合成一个"上游升级版" pretty（改版本号 + 整体下移 3 行 + 删一个函数 + 加一个函数），用来演练 align 的平移与报告 |
+| `skeleton.mjs` | 打印顶层结构（函数/常量、参数、行号、首行摘要），起名时先看这个 |
 | `functions.mjs` | 打印全部函数（含嵌套层级、行号），定位某个内部函数用 |
 
 ## 日常使用
 
 ```powershell
-# 重新生成 + 自检（改过 NAMES 或换了新内核后）
+# 重新生成 + 自检
 node deobfuscate.mjs
 node verify-alpha.mjs ../_worker.js ../plain/_worker.js
 
-# 只看结构
-node skeleton.mjs ../_worker.pretty.js
-node functions.mjs ../_worker.pretty.js
+# 演练 align（不动真实文件，产物在 tmp/）
+node make-simulated.mjs
+mkdir tmp 2>$null; copy ..\tools\names.json tmp\; copy ..\tools\comments.json tmp\
+node align.mjs --old ../_worker.pretty.js --new ../_worker.pretty.simulated.js --names tmp/names.json --comments tmp/comments.json --report tmp/align-report.md
 ```
 
-退出码：`verify-alpha` 不一致时返回 1（CI 靠它把关），其余脚本一律 0。
+退出码：`verify-alpha` 不一致返回 1（CI 靠它把关），`align` 恒为 0（允许部分命名，调用方看 `PENDING_NAMES=`）。
 
-## 上游发新版时的对齐流程
+## 上游发新版时的流程
+
+日常已由 [`.github/workflows/sync-upstream.yml`](../.github/workflows/sync-upstream.yml) 每周一自动完成：
+
+```
+merge 上游 core-only
+  → prettier 重新生成 _worker.pretty.js（新行号基准）
+  → align.mjs 把旧命名平移到新行号（结构指纹 + LCS，内层函数增删不影响外层命名）
+  → deobfuscate.mjs 生成新的 plain/_worker.js
+  → verify-alpha（alpha 等价，硬性门槛）
+  → 面板 55 项接口测试（硬性门槛）
+  → 全部通过才 commit + push；有未命名函数则开 issue 列出待命名行号
+```
+
+手动执行同一套流程：
 
 1. 用新的 `_worker.js` 覆盖仓库根目录，重新 prettier：
-   `npx prettier@3 --parser babel --print-width 100 _worker.js > _worker.pretty.js`
-2. `node skeleton.mjs ../_worker.pretty.js` 与 `node functions.mjs ../_worker.pretty.js`，
-   对比旧结构找新增/删除/挪动的函数。
-3. 在原 `NAMES` / `COMMENTS` 里按**新行号**修正或补充（脚本会先打印"行 X 未命中任何声明"，
-   说明旧映射里的某行在新版本已失效；同时覆盖率报告会列出还没命名的新函数）。
-4. `node deobfuscate.mjs && node verify-alpha.mjs ../_worker.js ../plain/_worker.js`，
-   通过即语义等价。
-5. 提交后 CI（`.github/workflows/verify.yml`）会再跑一遍 alpha 校验和面板 55 项接口测试。
+   `npx --yes prettier@3.9.10 --parser babel --print-width 100 _worker.js > _worker.pretty.new.js`
+2. `node align.mjs --old ../_worker.pretty.js --new ../_worker.pretty.new.js --report align-report.md`
+3. 把 `_worker.pretty.new.js` 改名为 `_worker.pretty.js`，跑 `node deobfuscate.mjs`
+4. `node verify-alpha.mjs ../_worker.js ../plain/_worker.js`
+5. `cd ../panel && CFNEW_TEST_CORE=... node --test src/test/*.test.mjs`（或直接信 CI）
+6. 报告里"需要人工命名"的行号补进 `names.json`（可选加 `comments.json`），再回到第 3 步。
 
 > 注意：`plain/_worker.js` 必须由脚本生成，不要手改——CI 的"确定性重建"步骤会重跑 `deobfuscate.mjs`
-> 并 `git diff --exit-code`，手改会直接判红。要改行为就改脚本里的映射（名字/注释）或上游内核本身。
+> 并 `git diff --exit-code`，手改会直接判红。要改行为就改 `names.json`（名字/注释）或上游内核本身。

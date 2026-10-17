@@ -1,0 +1,151 @@
+name: sync-upstream
+
+# 每周把上游 byJoey/cfnew 的 core-only 分支同步进来，并自动完成"解码对齐"：
+#   merge 上游 → prettier 重新格式化 → align 平移命名映射 → 生成明文 → 校验 → 提交
+# 任何一步不通过都不会推送，仓库保持在上一次可用状态。
+# 新增函数若没能自动命名，会开 issue 列出需要人工命名的行号。
+
+on:
+  schedule:
+    - cron: "23 4 * * 1" # 每周一 04:23 UTC（北京 12:23）
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "即使与上游一致也完整跑一遍（用于验证流水线 / 检查格式漂移）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: https://github.com/byJoey/cfnew.git
+  UPSTREAM_BRANCH: core-only
+  PRETTIER: "3.9.10"
+
+jobs:
+  sync:
+    name: 同步 + 解码对齐
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: core-only
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: 安装工具依赖
+        working-directory: tools
+        run: npm install --no-audit --no-fund
+
+      - name: 拉取上游并判断是否有更新
+        id: check
+        run: |
+          git remote add upstream "$UPSTREAM_REPO" 2>/dev/null || git remote set-url upstream "$UPSTREAM_REPO"
+          git fetch --no-tags upstream "$UPSTREAM_BRANCH"
+          behind=$(git rev-list --count "HEAD..upstream/$UPSTREAM_BRANCH")
+          sha=$(git rev-parse --short "upstream/$UPSTREAM_BRANCH")
+          echo "behind=$behind" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          if [ "$behind" = "0" ] && [ "${{ inputs.force }}" != "true" ]; then
+            echo "already=1" >> "$GITHUB_OUTPUT"
+            echo "上游无更新（$sha），跳过同步" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "already=0" >> "$GITHUB_OUTPUT"
+            echo "上游领先 $behind 个提交（$sha），开始同步" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: 合并上游
+        if: steps.check.outputs.already == '0' && steps.check.outputs.behind != '0'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git merge --no-edit "upstream/$UPSTREAM_BRANCH" -m "merge: 上游 $UPSTREAM_BRANCH @ ${{ steps.check.outputs.sha }}"; then
+            echo "::error::上游改动与本仓库冲突，需要手动解决后重新运行"
+            git merge --abort || true
+            exit 1
+          fi
+
+      - name: 重新格式化内核（prettier，行号基准）
+        if: steps.check.outputs.already == '0'
+        run: npx --yes "prettier@$PRETTIER" --parser babel --print-width 100 _worker.js > _worker.pretty.new.js
+
+      - name: 命名对齐（把旧映射平移到新版）
+        if: steps.check.outputs.already == '0'
+        run: |
+          node tools/align.mjs --old _worker.pretty.js --new _worker.pretty.new.js --report align-report.md | tee align.log
+          mv _worker.pretty.new.js _worker.pretty.js
+          cat align-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 生成明文内核
+        if: steps.check.outputs.already == '0'
+        run: node tools/deobfuscate.mjs
+
+      - name: alpha 等价性校验
+        if: steps.check.outputs.already == '0'
+        run: node tools/verify-alpha.mjs _worker.js plain/_worker.js
+
+      - name: 面板接口契约（55 项）
+        if: steps.check.outputs.already == '0'
+        run: |
+          git clone --depth 1 https://github.com/byJoey/cfnew-panel.git /tmp/panel
+          cd /tmp/panel
+          CFNEW_TEST_CORE="$GITHUB_WORKSPACE/plain/_worker.js" node --test src/test/*.test.mjs
+
+      - name: 提交并推送
+        if: steps.check.outputs.already == '0'
+        id: push
+        run: |
+          git add -A
+          if git diff --cached --quiet; then
+            echo "pushed=0" >> "$GITHUB_OUTPUT"
+            echo "工作区无变化，不产生提交" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          version=$(node -e "console.log(require('fs').readFileSync('plain/_worker.js','utf8').match(/CORE_VERSION = \"([^\"]+)\"/)[1])")
+          git commit -m "chore: 同步上游内核 $version（${{ steps.check.outputs.sha }}）
+
+          自动流程：merge 上游 → prettier → align → 解文明文化 → alpha 校验 → 面板 55 项测试"
+          git push origin "HEAD:$UPSTREAM_BRANCH"
+          echo "pushed=1" >> "$GITHUB_OUTPUT"
+          {
+            echo "已推送提交：$(git rev-parse --short HEAD)"
+            echo "内核版本：$version"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 有未命名函数时开 issue
+        if: steps.check.outputs.already == '0' && steps.push.outputs.pushed == '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pending=$(grep -oP 'PENDING_NAMES=\K\d+' align.log | tail -1 || echo 0)
+          if [ "${pending:-0}" = "0" ]; then
+            echo "全部函数都已命名，无需开 issue" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          version=$(node -e "console.log(require('fs').readFileSync('plain/_worker.js','utf8').match(/CORE_VERSION = \"([^\"]+)\"/)[1])")
+          title="上游内核 $version 有 $pending 个函数待命名"
+          existing=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number // empty')
+          {
+            echo "$title"
+            echo ""
+            echo "同步流程已自动完成并通过 alpha 校验与面板测试，以下函数还没起语义名（保留原始短名）："
+            echo ""
+            cat align-report.md
+            echo ""
+            echo "补名字方式：把上表行号加进 \`tools/names.json\`（值=语义名，可顺带加 \`tools/comments.json\` 注释），"
+            echo "然后本地跑 \`node tools/deobfuscate.mjs\` 重新生成 \`plain/_worker.js\`。"
+          } > /tmp/issue-body.md
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file /tmp/issue-body.md
+          else
+            gh issue create --title "$title" --body-file /tmp/issue-body.md
+          fi

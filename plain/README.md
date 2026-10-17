@@ -47,12 +47,13 @@ node --test src/test/*.test.mjs
 
 两条校验都在 GitHub Actions 上跑，公有仓库不计分钟数：
 
-| job | 内容 | 失败含义 |
-| --- | --- | --- |
-| `alpha-equivalence` | ① 明文与 `_worker.js` AST alpha 等价；② 重跑 `deobfuscate.mjs` 后 `plain/_worker.js` 无 diff | 有人手改了明文版，或它与压缩内核已经不同步 |
-| `panel-compat` | 拉取作者最新 [byJoey/cfnew-panel](https://github.com/byJoey/cfnew-panel)，用**明文内核**跑 55 项接口/订阅测试 | 面板契约变了，或明文版接口对不上 |
+| 工作流 | job | 内容 | 失败含义 |
+| --- | --- | --- | --- |
+| `verify.yml` | `alpha-equivalence` | ① 明文与 `_worker.js` AST alpha 等价；② 重跑 `deobfuscate.mjs` 后 `plain/_worker.js` 无 diff | 有人手改了明文版，或它与压缩内核已经不同步 |
+| `verify.yml` | `panel-compat` | 拉取作者最新 [byJoey/cfnew-panel](https://github.com/byJoey/cfnew-panel)，用**明文内核**跑 55 项接口/订阅测试 | 面板契约变了，或明文版接口对不上 |
+| `sync-upstream.yml` | `sync` | **每周一自动同步上游**：merge `byJoey/cfnew@core-only` → prettier → `align.mjs` 平移命名 → 重建明文 → alpha 校验 → 面板 55 项 → 通过才推送；新函数没自动命名的开 issue | 合并冲突、上游改动了核心逻辑导致 alpha/面板测试不过（仓库保持原状，不会被改坏） |
 
-触发：推送到 `core-only`、PR、每天 03:17 UTC 定时巡检（面板发布新版内核/改接口时，即使本仓库没动也会亮红）、手动 `workflow_dispatch`。
+触发：`verify.yml` 在推送到 `core-only`、PR、每天 03:17 UTC 巡检、手动；`sync-upstream.yml` 每周一 04:23 UTC、手动（可勾选 `force` 在无更新时也完整跑一遍）。
 
 面板 fixture 与 `_worker.js` 的哈希差异只作为 notice 提示（面板可能已升到新内核），不阻断构建；语义是否仍一致以 `panel-compat` 的测试结果为准。
 
@@ -83,11 +84,16 @@ node --test src/test/*.test.mjs
 
 ```
 _worker.js                        # 上游压缩产物（原样，勿改）
-_worker.pretty.js                 # prettier 格式化后的压缩产物（还原脚本的输入）
+_worker.pretty.js                 # prettier 格式化后的压缩产物（行号基准）
 plain/_worker.js                  # 明文化版本（本文档描述的文件）
+tools/names.json                  # 行号 → 语义名（align.mjs 自动平移，可手工补）
+tools/comments.json               # 行号 → 注释
 tools/deobfuscate.mjs             # 生成明文化版本（重命名 + 注释）
+tools/align.mjs                   # 上游升级后自动对齐行号（结构指纹 + LCS）
 tools/verify-alpha.mjs            # AST alpha 等价性校验
+tools/make-simulated.mjs          # 合成"升级版"演练 align
 tools/skeleton.mjs                # 打印顶层结构（辅助命名）
 tools/functions.mjs               # 打印全部函数与嵌套关系（辅助命名）
 .github/workflows/verify.yml      # CI：alpha 等价 + 面板 55 项契约测试
+.github/workflows/sync-upstream.yml # CI：每周自动同步上游并解码对齐
 ```
