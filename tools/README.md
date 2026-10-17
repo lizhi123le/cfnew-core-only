@@ -31,11 +31,10 @@ _worker.js  ──prettier──▶  _worker.pretty.js  ──deobfuscate──�
 | `deobfuscate.mjs` | 读 `_worker.pretty.js` + `names.json` + `comments.json`，做**作用域安全**重命名并插注释，生成 `plain/_worker.js`；结束时报告命名覆盖率，未命名的函数逐条列出（L行号 + 原始短名） |
 | `align.mjs` | **上游升级后的自动对齐**：给新旧两版每个实体（导入项/模块常量/函数）算结构指纹（抹掉标识符、剔除内层函数），对新旧序列做 LCS，把旧名字平移到新行号；无法匹配的新函数进报告待人工命名 |
 | `verify-alpha.mjs` | **等价校验**：两份源码所有绑定统一改名为 `c0、c1…`，抹掉注释/位置/字面量写法后逐字符比较。一致即证明「只有名字不同，语义严格相同」 |
-| `check.sh` | 一道命令跑完两道硬门槛：alpha 等价 + 面板 55 项测试（CI 的 verify / sync / release 都调它，本地也可直接用） |
+| `check.sh` | 一道命令跑完三道硬门槛：align 自测 + alpha 等价 + 面板 55 项测试（CI 的 verify / sync 都调它，本地也可直接用） |
 | `release.sh` | 按 `plain/_worker.js` 的 `CORE_VERSION` 打包并发布 GitHub Release：`_worker.js`、`_worker.plain.js`、`pages.zip`、`SHA256SUMS.txt`；同名 tag 幂等跳过 |
-| `make-simulated.mjs` | 合成一个"上游升级版" pretty（改版本号 + 整体下移 3 行 + 删一个函数 + 加一个函数），用来演练 align 的平移与报告 |
-| `skeleton.mjs` | 打印顶层结构（函数/常量、参数、行号、首行摘要），起名时先看这个 |
-| `functions.mjs` | 打印全部函数（含嵌套层级、行号），定位某个内部函数用 |
+| `self-test-align.mjs` | align 的回归自测：造一个"行号整体下移 + 版本号变更"的假升级版，断言命名 100% 继承、无新增待命名（`check.sh` 会跑） |
+| `structure.mjs` | 看结构辅助命名：默认打印顶层声明（kind/名字/参数/行号/首行摘要），加 `--functions` 打印全部函数（含嵌套层级） |
 
 ## 日常使用
 
@@ -44,16 +43,15 @@ _worker.js  ──prettier──▶  _worker.pretty.js  ──deobfuscate──�
 node deobfuscate.mjs
 node verify-alpha.mjs ../_worker.js ../plain/_worker.js
 
-# 一道命令跑完两道硬门槛（alpha + 面板 55 项，CI 用的也是这个）
+# 三道硬门槛（align 自测 + alpha + 面板 55 项，CI 用的也是这个）
 bash check.sh
 
-# 演练 align（不动真实文件，产物在 tmp/）
-node make-simulated.mjs
-mkdir tmp 2>$null; copy ..\tools\names.json tmp\; copy ..\tools\comments.json tmp\
-node align.mjs --old ../_worker.pretty.js --new ../_worker.pretty.simulated.js --names tmp/names.json --comments tmp/comments.json --report tmp/align-report.md
+# 看结构，给新函数起名
+node structure.mjs                 # 顶层声明
+node structure.mjs --functions     # 全部函数（含嵌套）
 ```
 
-退出码：`verify-alpha` 不一致返回 1（CI 靠它把关），`align` 恒为 0（允许部分命名，调用方看 `PENDING_NAMES=`）。
+退出码：`verify-alpha` / `self-test-align` 失败返回 1（CI 靠它们把关），`align` 恒为 0（允许部分命名，调用方看 `PENDING_NAMES=`）。
 
 ## 上游发新版时的流程
 

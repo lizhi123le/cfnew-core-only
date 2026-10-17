@@ -49,7 +49,7 @@ node --test src/test/*.test.mjs
 
 | job | 何时跑 | 内容 |
 | --- | --- | --- |
-| `verify` | **仓库被修改**：push 到 `core-only`、PR | ① `deobfuscate.mjs` 重跑后 `plain/_worker.js` 无 diff（防手改漂移）；② `tools/check.sh`：alpha 等价 + 面板 55 项 |
+| `verify` | **仓库被修改**：push 到 `core-only`、PR | ① `deobfuscate.mjs` 重跑后 `plain/_worker.js` 无 diff（防手改漂移）；② `tools/check.sh`：align 自测 + alpha 等价 + 面板 55 项 |
 | `sync` | **每周一 04:23 UTC**、手动 dispatch | merge `byJoey/cfnew@core-only` → prettier → `align.mjs` 平移命名 → 重建明文 → `tools/check.sh` → 通过才推送 → `release.sh` 发布 Release → 未命名函数开 issue |
 
 发布不需要单独的工作流：同步任务里直接调用 `tools/release.sh`（幂等，同名 tag 直接跳过）。所以 `sync → 发布 → 校验` 是同一条 job 里的顺序步骤，任何一步失败都不会推送、也不会发布。
@@ -105,9 +105,9 @@ tools/align.mjs                   # 上游升级后自动对齐行号（结构�
 tools/verify-alpha.mjs            # AST alpha 等价性校验
 tools/check.sh                    # 一道命令跑完 alpha + 面板 55 项（CI 与本地共用）
 tools/release.sh                  # 按 CORE_VERSION 发布 Release
-tools/make-simulated.mjs          # 合成"升级版"演练 align
-tools/skeleton.mjs                # 打印顶层结构（辅助命名）
-tools/functions.mjs               # 打印全部函数与嵌套关系（辅助命名）
+tools/self-test-align.mjs         # align 回归自测（造"升级版"验证命名继承）
+tools/structure.mjs               # 查看结构辅助命名（--functions 看嵌套）
+
 .github/workflows/sync-upstream.yml # 唯一流水线：push/PR 校验 + 每周同步/发布（原 verify 已并入）
 
 ```
