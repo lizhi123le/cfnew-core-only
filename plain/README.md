@@ -54,7 +54,7 @@ node --test src/test/*.test.mjs
 | `sync-upstream.yml` | `sync` | **每周一自动同步上游**：merge `byJoey/cfnew@core-only` → prettier → `align.mjs` 平移命名 → 重建明文 → alpha 校验 → 面板 55 项 → 通过才推送；新函数没自动命名的开 issue | 合并冲突、上游改动了核心逻辑导致 alpha/面板测试不过（仓库保持原状，不会被改坏） |
 | `release-kernel.yml` | `release` | **按版本发布内核**：读 `plain/_worker.js` 的 `CORE_VERSION`，与 `_worker.js` 的版本常量交叉核对，跑 alpha + 面板测试后创建 Release，附 `_worker.js`（压缩/混淆）、`_worker.plain.js`（明文）、`pages.zip`、`SHA256SUMS.txt`；同名 tag 已存在则跳过 | 两处版本号不一致、测试不过，或 tag 被占用 |
 
-触发：`verify.yml` 在推送到 `core-only`、PR、每天 03:17 UTC 巡检、手动；`sync-upstream.yml` 每周一 04:23 UTC、手动（可勾选 `force` 在无更新时也完整跑一遍）；`release-kernel.yml` 在 `plain/_worker.js` / `_worker.js` / `pages.zip` 变更时、手动。
+触发：`verify.yml` **只在有事发生时跑**——推送到 `core-only`（仓库内容被修改）、`sync-upstream` 成功跑完（bot 推送不触发 push 事件，用 `workflow_run` 补上）、PR、手动；**没有每日定时巡检**。`sync-upstream.yml` 每周一 04:23 UTC、手动（可勾选 `force` 在无更新时也完整跑一遍）；`release-kernel.yml` 在 `plain/_worker.js` / `_worker.js` / `pages.zip` 变更时、手动。
 
 ## 发布
 
