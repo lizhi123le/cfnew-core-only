@@ -12,6 +12,9 @@ on:
       - "plain/_worker.js"
       - "_worker.js"
       - "pages.zip"
+  workflow_run:
+    workflows: ["sync-upstream"]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
