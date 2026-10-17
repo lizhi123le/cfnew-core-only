@@ -18,7 +18,7 @@ on:
   pull_request:
     branches: [core-only]
   workflow_run:
-    workflows: ["sync-upstream"]
+    workflows: ["release-kernel"]
     types: [completed]
   workflow_dispatch:
 
