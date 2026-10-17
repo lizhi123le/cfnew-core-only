@@ -41,7 +41,7 @@ env:
 jobs:
   # ── 校验：仓库内容被修改时跑（push / PR） ───────────────────────────────
   verify:
-    name: 校验（alpha 等价 + 面板 55 项）
+    name: 校验（align 自测 + alpha + 面板 55 项）
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
