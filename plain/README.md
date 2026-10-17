@@ -52,8 +52,20 @@ node --test src/test/*.test.mjs
 | `verify.yml` | `alpha-equivalence` | ① 明文与 `_worker.js` AST alpha 等价；② 重跑 `deobfuscate.mjs` 后 `plain/_worker.js` 无 diff | 有人手改了明文版，或它与压缩内核已经不同步 |
 | `verify.yml` | `panel-compat` | 拉取作者最新 [byJoey/cfnew-panel](https://github.com/byJoey/cfnew-panel)，用**明文内核**跑 55 项接口/订阅测试 | 面板契约变了，或明文版接口对不上 |
 | `sync-upstream.yml` | `sync` | **每周一自动同步上游**：merge `byJoey/cfnew@core-only` → prettier → `align.mjs` 平移命名 → 重建明文 → alpha 校验 → 面板 55 项 → 通过才推送；新函数没自动命名的开 issue | 合并冲突、上游改动了核心逻辑导致 alpha/面板测试不过（仓库保持原状，不会被改坏） |
+| `release-kernel.yml` | `release` | **按版本发布内核**：读 `plain/_worker.js` 的 `CORE_VERSION`，与 `_worker.js` 的版本常量交叉核对，跑 alpha + 面板测试后创建 Release，附 `_worker.js`（压缩/混淆）、`_worker.plain.js`（明文）、`pages.zip`、`SHA256SUMS.txt`；同名 tag 已存在则跳过 | 两处版本号不一致、测试不过，或 tag 被占用 |
 
-触发：`verify.yml` 在推送到 `core-only`、PR、每天 03:17 UTC 巡检、手动；`sync-upstream.yml` 每周一 04:23 UTC、手动（可勾选 `force` 在无更新时也完整跑一遍）。
+触发：`verify.yml` 在推送到 `core-only`、PR、每天 03:17 UTC 巡检、手动；`sync-upstream.yml` 每周一 04:23 UTC、手动（可勾选 `force` 在无更新时也完整跑一遍）；`release-kernel.yml` 在 `plain/_worker.js` / `_worker.js` / `pages.zip` 变更时、手动。
+
+## 发布
+
+内核 Release 的 tag 就是版本号本身（如 `2026.10.17.2`），和面板的 `PANEL_VERSION` / 内核的 `CORE_VERSION` 一致，方便直接对照：
+
+| 资产 | 用途 |
+| --- | --- |
+| `_worker.js` | 官方压缩/混淆内核，推荐部署 |
+| `_worker.plain.js` | 明文内核（就是本目录的 `_worker.js`），与上一行逐 AST 等价 |
+| `pages.zip` | Cloudflare Pages 直接上传包 |
+| `SHA256SUMS.txt` | 上面三个文件的 SHA-256 |
 
 面板 fixture 与 `_worker.js` 的哈希差异只作为 notice 提示（面板可能已升到新内核），不阻断构建；语义是否仍一致以 `panel-compat` 的测试结果为准。
 

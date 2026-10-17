@@ -76,3 +76,17 @@ merge 上游 core-only
 
 > 注意：`plain/_worker.js` 必须由脚本生成，不要手改——CI 的"确定性重建"步骤会重跑 `deobfuscate.mjs`
 > 并 `git diff --exit-code`，手改会直接判红。要改行为就改 `names.json`（名字/注释）或上游内核本身。
+
+## 发布 Release
+
+`release.sh` 负责打开发布包并创建 GitHub Release，版本号取自 `plain/_worker.js` 的 `CORE_VERSION`，
+并与 `_worker.js` 的版本常量交叉核对（不一致直接失败，避免发错版本）：
+
+```bash
+bash tools/release.sh --check     # 输出 TAG=... EXISTS=0/1（CI 用它做幂等判断）
+bash tools/release.sh --dry-run   # 本地演练：只看产物和发布说明
+bash tools/release.sh             # 真正发布（需要 gh 已登录 / GH_TOKEN）
+```
+
+资产：`_worker.js`（压缩/混淆）、`_worker.plain.js`（明文）、`pages.zip`、`SHA256SUMS.txt`；
+tag 就是版本号本身（如 `2026.10.17.2`），已存在则跳过。

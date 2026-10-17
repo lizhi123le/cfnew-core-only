@@ -121,10 +121,23 @@ jobs:
             echo "内核版本：$version"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: 发布内核 Release（明文 + 混淆）
+        if: steps.check.outputs.already == '0' && steps.push.outputs.pushed == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(bash tools/release.sh --check | grep '^TAG=' | cut -d= -f2)
+          bash tools/release.sh
+          {
+            echo ""
+            echo "已按 CORE_VERSION 发布内核 $tag（已存在则跳过）"
+            echo "资产：_worker.js（压缩/混淆）、_worker.plain.js（明文）、pages.zip、SHA256SUMS.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: 有未命名函数时开 issue
         if: steps.check.outputs.already == '0' && steps.push.outputs.pushed == '1'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           pending=$(grep -oP 'PENDING_NAMES=\K\d+' align.log | tail -1 || echo 0)
           if [ "${pending:-0}" = "0" ]; then

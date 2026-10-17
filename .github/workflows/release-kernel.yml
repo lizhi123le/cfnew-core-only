@@ -1,0 +1,71 @@
+name: release-kernel
+
+# 按 plain/_worker.js 里的 CORE_VERSION 发布内核 Release（明文 + 对应的压缩/混淆文件）。
+# 版本号唯一来源是明文文件那一行 `const CORE_VERSION = "x.y.z"`，
+# 发布前会与 _worker.js 内的版本常量交叉核对，并跑 alpha 等价 + 面板 55 项测试。
+# 已存在同名 tag 时直接跳过（幂等），所以重复推送不会覆盖已发布的内核。
+
+on:
+  push:
+    branches: [core-only]
+    paths:
+      - "plain/_worker.js"
+      - "_worker.js"
+      - "pages.zip"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-kernel
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: 发布内核 ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: 读取版本（plain/_worker.js 的 CORE_VERSION）并检查是否已发布
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash tools/release.sh --check >> "$GITHUB_OUTPUT"
+          echo "待发布 tag：${{ steps.check.outputs.TAG }}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: 安装工具依赖
+        if: steps.check.outputs.EXISTS == '0'
+        working-directory: tools
+        run: npm ci --no-audit --no-fund
+
+      - name: alpha 等价性校验
+        if: steps.check.outputs.EXISTS == '0'
+        run: node tools/verify-alpha.mjs _worker.js plain/_worker.js
+
+      - name: 面板接口契约（55 项）
+        if: steps.check.outputs.EXISTS == '0'
+        run: |
+          git clone --depth 1 https://github.com/byJoey/cfnew-panel.git /tmp/panel
+          cd /tmp/panel
+          CFNEW_TEST_CORE="$GITHUB_WORKSPACE/plain/_worker.js" node --test src/test/*.test.mjs
+
+      - name: 创建 Release（明文 + 混淆 + Pages 包 + 校验和）
+        if: steps.check.outputs.EXISTS == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash tools/release.sh
+          {
+            echo ""
+            echo "已发布内核版本：${{ steps.check.outputs.TAG }}"
+            echo "资产：_worker.js（压缩/混淆）、_worker.plain.js（明文）、pages.zip、SHA256SUMS.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
