@@ -1,6 +1,6 @@
 # 精简内核 · 明文化版本
 
-[![verify-kernel](https://github.com/lizhi123le/cfnew-core-only/actions/workflows/verify.yml/badge.svg)](https://github.com/lizhi123le/cfnew-core-only/actions/workflows/verify.yml)
+[![kernel-pipeline](https://github.com/lizhi123le/cfnew-core-only/actions/workflows/sync-upstream.yml/badge.svg)](https://github.com/lizhi123le/cfnew-core-only/actions/workflows/sync-upstream.yml)
 
 `plain/_worker.js` 是本仓库 `_worker.js`（`core-only` 分支发布产物）的**可读明文版本**：
 
@@ -43,18 +43,19 @@ node --test src/test/*.test.mjs
 - `/region`、`/test-api`、XHTTP 短路径与 `stream-one`、WebSocket 升级、家宽开关 `jk`；
 - 面板到 Worker 的转发/鉴权/缓存/绑定（`w` 变量）与 403/503 失败关闭行为。
 
-## CI 守护（.github/workflows/verify.yml）
+## CI 守护（.github/workflows/sync-upstream.yml）
 
-两条校验都在 GitHub Actions 上跑，公有仓库不计分钟数：
+两条校验都在 GitHub Actions 上跑，公有仓库不计分钟数。校验逻辑只有一份 `tools/check.sh`（本地也能直接跑），CI 里两个 job 复用它：
 
-| 工作流 | job | 内容 | 失败含义 |
+| 工作流 | job | 何时跑 | 内容 |
 | --- | --- | --- | --- |
-| `verify.yml` | `alpha-equivalence` | ① 明文与 `_worker.js` AST alpha 等价；② 重跑 `deobfuscate.mjs` 后 `plain/_worker.js` 无 diff | 有人手改了明文版，或它与压缩内核已经不同步 |
-| `verify.yml` | `panel-compat` | 拉取作者最新 [byJoey/cfnew-panel](https://github.com/byJoey/cfnew-panel)，用**明文内核**跑 55 项接口/订阅测试 | 面板契约变了，或明文版接口对不上 |
-| `sync-upstream.yml` | `sync` | **每周一自动同步上游**：merge `byJoey/cfnew@core-only` → prettier → `align.mjs` 平移命名 → 重建明文 → alpha 校验 → 面板 55 项 → 通过才推送；新函数没自动命名的开 issue | 合并冲突、上游改动了核心逻辑导致 alpha/面板测试不过（仓库保持原状，不会被改坏） |
-| `release-kernel.yml` | `release` | **按版本发布内核**：读 `plain/_worker.js` 的 `CORE_VERSION`，与 `_worker.js` 的版本常量交叉核对，跑 alpha + 面板测试后创建 Release，附 `_worker.js`（压缩/混淆）、`_worker.plain.js`（明文）、`pages.zip`、`SHA256SUMS.txt`；同名 tag 已存在则跳过 | 两处版本号不一致、测试不过，或 tag 被占用 |
+| `sync-upstream.yml` | `verify` | **仓库被修改**：push 到 `core-only`、PR；以及 **`release-kernel` 跑完之后** | ① `deobfuscate.mjs` 重跑后 `plain/_worker.js` 无 diff（防手改漂移）；② `tools/check.sh`：alpha 等价 + 面板 55 项 |
+| `sync-upstream.yml` | `sync` | **每周一 04:23 UTC**、手动 dispatch | merge `byJoey/cfnew@core-only` → prettier → `align.mjs` 平移命名 → 重建明文 → `tools/check.sh` → 通过才推送 → 发布 Release → 未命名函数开 issue |
+| `release-kernel.yml` | `release` | `plain/_worker.js` / `_worker.js` / `pages.zip` 变更、**`sync-upstream` 跑完之后**、手动 | 读 `CORE_VERSION` 与 `_worker.js` 版本常量交叉核对，跑 `tools/check.sh` 后创建 Release（`_worker.js`、`_worker.plain.js`、`pages.zip`、`SHA256SUMS.txt`）；同名 tag 已存在则跳过 |
 
-触发：`verify.yml` **只在有事发生时跑**——推送到 `core-only`（仓库内容被修改）、`sync-upstream` 成功跑完（bot 推送不触发 push 事件，用 `workflow_run` 补上）、PR、手动；**没有每日定时巡检**。`sync-upstream.yml` 每周一 04:23 UTC、手动（可勾选 `force` 在无更新时也完整跑一遍）；`release-kernel.yml` 在 `plain/_worker.js` / `_worker.js` / `pages.zip` 变更时、手动。
+链路是 `sync → release → verify`：同步推上来的内容先发布，发布完再确认一次（bot 用 `GITHUB_TOKEN` 推送不会触发 `push` 事件，所以用 `workflow_run` 接力）。
+
+没有"每天固定时间"的巡检：要么仓库有变更，要么到了每周同步时间，否则什么都不跑。原 `verify-kernel` 工作流已并入 `sync-upstream.yml`。
 
 ## 发布
 
@@ -67,7 +68,7 @@ node --test src/test/*.test.mjs
 | `pages.zip` | Cloudflare Pages 直接上传包 |
 | `SHA256SUMS.txt` | 上面三个文件的 SHA-256 |
 
-面板 fixture 与 `_worker.js` 的哈希差异只作为 notice 提示（面板可能已升到新内核），不阻断构建；语义是否仍一致以 `panel-compat` 的测试结果为准。
+面板 fixture 与 `_worker.js` 的哈希差异只作为 notice 提示（面板可能已升到新内核），不阻断构建；语义是否仍一致以 `tools/check.sh` 里面板 55 项的测试结果为准。
 
 ## 接口契约（改这个文件时别动这些）
 
@@ -103,9 +104,11 @@ tools/comments.json               # 行号 → 注释
 tools/deobfuscate.mjs             # 生成明文化版本（重命名 + 注释）
 tools/align.mjs                   # 上游升级后自动对齐行号（结构指纹 + LCS）
 tools/verify-alpha.mjs            # AST alpha 等价性校验
+tools/check.sh                    # 一道命令跑完 alpha + 面板 55 项（CI 与本地共用）
+tools/release.sh                  # 按 CORE_VERSION 发布 Release
 tools/make-simulated.mjs          # 合成"升级版"演练 align
 tools/skeleton.mjs                # 打印顶层结构（辅助命名）
 tools/functions.mjs               # 打印全部函数与嵌套关系（辅助命名）
-.github/workflows/verify.yml      # CI：alpha 等价 + 面板 55 项契约测试
-.github/workflows/sync-upstream.yml # CI：每周自动同步上游并解码对齐
+.github/workflows/sync-upstream.yml # 唯一流水线：push/PR 校验 + 每周同步/发布（原 verify 已并入）
+.github/workflows/release-kernel.yml # 内核文件变更时按版本发 Release
 ```

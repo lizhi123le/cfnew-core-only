@@ -1,17 +1,28 @@
-name: sync-upstream
+name: kernel-pipeline
 
-# 每周把上游 byJoey/cfnew 的 core-only 分支同步进来，并自动完成"解码对齐"：
-#   merge 上游 → prettier 重新格式化 → align 平移命名映射 → 生成明文 → 校验 → 提交
-# 任何一步不通过都不会推送，仓库保持在上一次可用状态。
-# 新增函数若没能自动命名，会开 issue 列出需要人工命名的行号。
+# 仓库里唯一的自动化流水线（原 verify-kernel 已并入）：
+#
+#   仓库被修改（push / PR） → 只跑校验：明文可重建 + alpha 等价 + 面板 55 项
+#   release-kernel 跑完    → 同样跑校验（发布后的结果再确认一次）
+#   定时 / 手动            → 跑同步：merge 上游 → prettier → align → 重建明文
+#                            → 同样的校验 → 提交推送 → 发布 Release → 待命名则开 issue
+#
+# 没有"每天固定时间"的巡检：要么仓库有变更，要么到了每周同步时间，否则不跑。
 
 on:
+  push:
+    branches: [core-only]
+  pull_request:
+    branches: [core-only]
+  workflow_run:
+    workflows: ["release-kernel"]
+    types: [completed]
   schedule:
     - cron: "23 4 * * 1" # 每周一 04:23 UTC（北京 12:23）
   workflow_dispatch:
     inputs:
       force:
-        description: "即使与上游一致也完整跑一遍（用于验证流水线 / 检查格式漂移）"
+        description: "即使与上游一致也完整跑一遍同步流水线（验证流程 / 检查格式漂移）"
         type: boolean
         default: false
 
@@ -20,17 +31,58 @@ permissions:
   issues: write
 
 concurrency:
-  group: sync-upstream
-  cancel-in-progress: false
+  group: kernel-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 env:
   UPSTREAM_REPO: https://github.com/byJoey/cfnew.git
   UPSTREAM_BRANCH: core-only
+  PANEL_REPO: https://github.com/byJoey/cfnew-panel.git
   PRETTIER: "3.9.10"
+  CFNEW_TEST_CORE: ${{ github.workspace }}/plain/_worker.js
 
 jobs:
+  # ── 校验：仓库被修改（push / PR）或发布完成后跑 ─────────────────────────
+  verify:
+    name: 校验（alpha 等价 + 面板 55 项）
+    if: |
+      github.event_name == 'push' ||
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # workflow_run 时检出默认分支最新提交（即刚发布/刚推上来的结果）
+          ref: ${{ github.event_name == 'workflow_run' && 'core-only' || github.ref }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: tools/package.json
+
+      - name: 安装工具依赖
+        working-directory: tools
+        run: npm ci --no-audit --no-fund
+
+      - name: 明文内核可由脚本确定性重建（防止手改漂移）
+        run: |
+          node tools/deobfuscate.mjs
+          git diff --exit-code -- plain/_worker.js
+
+      - name: alpha 等价 + 面板 55 项
+        run: bash tools/check.sh
+
+      - name: 记录内核版本
+        run: |
+          version=$(node -e "console.log(require('fs').readFileSync('plain/_worker.js','utf8').match(/CORE_VERSION = \"([^\"]+)\"/)[1])")
+          echo "内核版本：$version" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # ── 同步：定时或手动触发（含解码对齐、校验、发布） ─────────────────────
   sync:
-    name: 同步 + 解码对齐
+    name: 同步上游 + 解码对齐
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -89,16 +141,9 @@ jobs:
         if: steps.check.outputs.already == '0'
         run: node tools/deobfuscate.mjs
 
-      - name: alpha 等价性校验
+      - name: 校验（alpha 等价 + 面板 55 项）
         if: steps.check.outputs.already == '0'
-        run: node tools/verify-alpha.mjs _worker.js plain/_worker.js
-
-      - name: 面板接口契约（55 项）
-        if: steps.check.outputs.already == '0'
-        run: |
-          git clone --depth 1 https://github.com/byJoey/cfnew-panel.git /tmp/panel
-          cd /tmp/panel
-          CFNEW_TEST_CORE="$GITHUB_WORKSPACE/plain/_worker.js" node --test src/test/*.test.mjs
+        run: bash tools/check.sh
 
       - name: 提交并推送
         if: steps.check.outputs.already == '0'
@@ -113,7 +158,7 @@ jobs:
           version=$(node -e "console.log(require('fs').readFileSync('plain/_worker.js','utf8').match(/CORE_VERSION = \"([^\"]+)\"/)[1])")
           git commit -m "chore: 同步上游内核 $version（${{ steps.check.outputs.sha }}）
 
-          自动流程：merge 上游 → prettier → align → 解文明文化 → alpha 校验 → 面板 55 项测试"
+          自动流程：merge 上游 → prettier → align → 明文重建 → alpha 校验 → 面板 55 项测试"
           git push origin "HEAD:$UPSTREAM_BRANCH"
           echo "pushed=1" >> "$GITHUB_OUTPUT"
           {
