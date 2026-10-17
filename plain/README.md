@@ -45,17 +45,16 @@ node --test src/test/*.test.mjs
 
 ## CI 守护（.github/workflows/sync-upstream.yml）
 
-两条校验都在 GitHub Actions 上跑，公有仓库不计分钟数。校验逻辑只有一份 `tools/check.sh`（本地也能直接跑），CI 里两个 job 复用它：
+整个仓库只有一个工作流，公有仓库不计分钟数。校验逻辑只有一份 `tools/check.sh`（本地也能直接跑），两个 job 共用：
 
-| 工作流 | job | 何时跑 | 内容 |
-| --- | --- | --- | --- |
-| `sync-upstream.yml` | `verify` | **仓库被修改**：push 到 `core-only`、PR；以及 **`release-kernel` 跑完之后** | ① `deobfuscate.mjs` 重跑后 `plain/_worker.js` 无 diff（防手改漂移）；② `tools/check.sh`：alpha 等价 + 面板 55 项 |
-| `sync-upstream.yml` | `sync` | **每周一 04:23 UTC**、手动 dispatch | merge `byJoey/cfnew@core-only` → prettier → `align.mjs` 平移命名 → 重建明文 → `tools/check.sh` → 通过才推送 → 发布 Release → 未命名函数开 issue |
-| `release-kernel.yml` | `release` | `plain/_worker.js` / `_worker.js` / `pages.zip` 变更、**`sync-upstream` 跑完之后**、手动 | 读 `CORE_VERSION` 与 `_worker.js` 版本常量交叉核对，跑 `tools/check.sh` 后创建 Release（`_worker.js`、`_worker.plain.js`、`pages.zip`、`SHA256SUMS.txt`）；同名 tag 已存在则跳过 |
+| job | 何时跑 | 内容 |
+| --- | --- | --- |
+| `verify` | **仓库被修改**：push 到 `core-only`、PR | ① `deobfuscate.mjs` 重跑后 `plain/_worker.js` 无 diff（防手改漂移）；② `tools/check.sh`：alpha 等价 + 面板 55 项 |
+| `sync` | **每周一 04:23 UTC**、手动 dispatch | merge `byJoey/cfnew@core-only` → prettier → `align.mjs` 平移命名 → 重建明文 → `tools/check.sh` → 通过才推送 → `release.sh` 发布 Release → 未命名函数开 issue |
 
-链路是 `sync → release → verify`：同步推上来的内容先发布，发布完再确认一次（bot 用 `GITHUB_TOKEN` 推送不会触发 `push` 事件，所以用 `workflow_run` 接力）。
+发布不需要单独的工作流：同步任务里直接调用 `tools/release.sh`（幂等，同名 tag 直接跳过）。所以 `sync → 发布 → 校验` 是同一条 job 里的顺序步骤，任何一步失败都不会推送、也不会发布。
 
-没有"每天固定时间"的巡检：要么仓库有变更，要么到了每周同步时间，否则什么都不跑。原 `verify-kernel` 工作流已并入 `sync-upstream.yml`。
+没有"每天固定时间"的巡检：要么仓库有变更（`verify`），要么到了每周同步时间（`sync`），否则什么都不跑。原 `verify-kernel`、`release-kernel` 两个工作流都已并入 `sync-upstream.yml`。
 
 ## 发布
 
@@ -110,5 +109,5 @@ tools/make-simulated.mjs          # 合成"升级版"演练 align
 tools/skeleton.mjs                # 打印顶层结构（辅助命名）
 tools/functions.mjs               # 打印全部函数与嵌套关系（辅助命名）
 .github/workflows/sync-upstream.yml # 唯一流水线：push/PR 校验 + 每周同步/发布（原 verify 已并入）
-.github/workflows/release-kernel.yml # 内核文件变更时按版本发 Release
+
 ```

@@ -1,12 +1,12 @@
 name: kernel-pipeline
 
-# 仓库里唯一的自动化流水线（原 verify-kernel 已并入）：
+# 仓库里唯一的自动化流水线（原 verify-kernel、release-kernel 都已并入）：
 #
 #   仓库被修改（push / PR） → 只跑校验：明文可重建 + alpha 等价 + 面板 55 项
-#   release-kernel 跑完    → 同样跑校验（发布后的结果再确认一次）
 #   定时 / 手动            → 跑同步：merge 上游 → prettier → align → 重建明文
 #                            → 同样的校验 → 提交推送 → 发布 Release → 待命名则开 issue
 #
+# 发布不再单独开工作流：同步任务里自带 release.sh（幂等，同名 tag 直接跳过）。
 # 没有"每天固定时间"的巡检：要么仓库有变更，要么到了每周同步时间，否则不跑。
 
 on:
@@ -14,9 +14,6 @@ on:
     branches: [core-only]
   pull_request:
     branches: [core-only]
-  workflow_run:
-    workflows: ["release-kernel"]
-    types: [completed]
   schedule:
     - cron: "23 4 * * 1" # 每周一 04:23 UTC（北京 12:23）
   workflow_dispatch:
@@ -42,19 +39,13 @@ env:
   CFNEW_TEST_CORE: ${{ github.workspace }}/plain/_worker.js
 
 jobs:
-  # ── 校验：仓库被修改（push / PR）或发布完成后跑 ─────────────────────────
+  # ── 校验：仓库内容被修改时跑（push / PR） ───────────────────────────────
   verify:
     name: 校验（alpha 等价 + 面板 55 项）
-    if: |
-      github.event_name == 'push' ||
-      github.event_name == 'pull_request' ||
-      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          # workflow_run 时检出默认分支最新提交（即刚发布/刚推上来的结果）
-          ref: ${{ github.event_name == 'workflow_run' && 'core-only' || github.ref }}
 
       - uses: actions/setup-node@v7
         with:
@@ -167,7 +158,9 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 发布内核 Release（明文 + 混淆）
-        if: steps.check.outputs.already == '0' && steps.push.outputs.pushed == '1'
+        # 不依赖这次是否真的推了提交：dispatch 手动改过内核后也走这里，
+        # release.sh 自身幂等（同名 tag 已存在就跳过），不会重复发布。
+        if: steps.check.outputs.already == '0'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

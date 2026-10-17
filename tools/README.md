@@ -93,3 +93,6 @@ bash tools/release.sh             # 真正发布（需要 gh 已登录 / GH_TOKE
 
 资产：`_worker.js`（压缩/混淆）、`_worker.plain.js`（明文）、`pages.zip`、`SHA256SUMS.txt`；
 tag 就是版本号本身（如 `2026.10.17.2`），已存在则跳过。
+
+> 发布动作已并入 `sync-upstream.yml` 的 `sync` job（里面直接调用本脚本），
+> 所以不需要单独的工作流；手动改完内核后想发布，dispatch 一次 `sync` 并勾 `force` 即可（同名 tag 会跳过）。
