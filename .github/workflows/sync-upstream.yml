@@ -62,7 +62,7 @@ jobs:
           node tools/deobfuscate.mjs
           git diff --exit-code -- plain/_worker.js
 
-      - name: alpha 等价 + 面板 55 项
+      - name: 校验（align 自测 + alpha 等价 + 面板 55 项）
         run: bash tools/check.sh
 
       - name: 记录内核版本
@@ -132,7 +132,7 @@ jobs:
         if: steps.check.outputs.already == '0'
         run: node tools/deobfuscate.mjs
 
-      - name: 校验（alpha 等价 + 面板 55 项）
+      - name: 校验（align 自测 + alpha 等价 + 面板 55 项）
         if: steps.check.outputs.already == '0'
         run: bash tools/check.sh
 
