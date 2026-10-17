@@ -21,6 +21,12 @@ MODE="${1:-publish}"
 TAG_PREFIX="${TAG_PREFIX:-}"
 NOTES="${NOTES_FILE:-}"
 
+# gh 默认会猜仓库（本仓库有两个 remote 时会猜到 upstream），这里显式指定 origin
+REPO="${GH_REPO:-${GITHUB_REPOSITORY:-}}"
+if [ -z "$REPO" ]; then
+  REPO="$(git remote get-url origin | sed -E 's#(git@github.com:|https://github.com/)##; s#\.git$##')"
+fi
+
 read_version() {
   node -e '
     const fs = require("fs");
@@ -42,7 +48,7 @@ VERSION="$(read_version)" || { echo "::error::读取内核版本失败" >&2; exi
 TAG="${TAG_PREFIX}${VERSION}"
 
 if [ "$MODE" = "--check" ]; then
-  if gh release view "$TAG" >/dev/null 2>&1; then
+  if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
     echo "TAG=$TAG"
     echo "EXISTS=1"
   else
@@ -52,7 +58,7 @@ if [ "$MODE" = "--check" ]; then
   exit 0
 fi
 
-if gh release view "$TAG" >/dev/null 2>&1; then
+if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
   echo "Release $TAG 已存在，跳过（幂等）"
   exit 0
 fi
@@ -60,16 +66,20 @@ fi
 DIST="dist"
 rm -rf "$DIST"
 mkdir -p "$DIST"
-cp _worker.js "$DIST/_worker.js"
-cp plain/_worker.js "$DIST/_worker.plain.js"
-[ -f pages.zip ] && cp pages.zip "$DIST/pages.zip"
+# 从 HEAD 取内容而不是工作区文件：本地 core.autocrlf 会把换行改成 CRLF，
+# 直接 cp 会让本地发布和 CI 发布产生不同哈希。发布对象永远是"已提交的内容"。
+git show HEAD:_worker.js > "$DIST/_worker.js"
+git show HEAD:plain/_worker.js > "$DIST/_worker.plain.js"
+if git cat-file -e HEAD:pages.zip 2>/dev/null; then
+  git show HEAD:pages.zip > "$DIST/pages.zip"
+fi
 
 node -e '
-  const fs = require("fs"), crypto = require("crypto");
+  const fs = require("fs"), path = require("path"), crypto = require("crypto");
   const files = process.argv.slice(1);
   const lines = files.map((f) => {
     const h = crypto.createHash("sha256").update(fs.readFileSync(f)).digest("hex");
-    return `${h}  ${f}`;
+    return `${h}  ${path.basename(f)}`; // 校验和按资产名写，不含 dist/ 前缀
   });
   fs.writeFileSync("dist/SHA256SUMS.txt", lines.join("\n") + "\n");
 ' "$DIST/_worker.js" "$DIST/_worker.plain.js" "$DIST/pages.zip"
@@ -115,7 +125,7 @@ if [ "$MODE" = "--dry-run" ]; then
   exit 0
 fi
 
-gh release create "$TAG" \
+gh release create "$TAG" --repo "$REPO" \
   "$DIST/_worker.js" \
   "$DIST/_worker.plain.js" \
   "$DIST/pages.zip" \
@@ -125,4 +135,4 @@ gh release create "$TAG" \
   --target "$(git rev-parse HEAD)" \
   --latest
 
-echo "已发布：$(gh release view "$TAG" --json url --jq .url)"
+echo "已发布：$(gh release view "$TAG" --repo "$REPO" --json url --jq .url)"
