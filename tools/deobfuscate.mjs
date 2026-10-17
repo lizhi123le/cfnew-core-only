@@ -214,6 +214,20 @@ const COMMENTS = {
 const code = fs.readFileSync(SRC, 'utf8');
 const ast = parse(code, { sourceType: 'module' });
 
+// 先记下全部函数声明（含嵌套）的原始名字与行号，用于报告"尚未命名的函数"，
+// 这样上游发新版本时能一眼看出要往 NAMES 里补哪些行。
+const declaredFunctions = [];
+traverse(ast, {
+  'FunctionDeclaration|VariableDeclarator'(p) {
+    const node = p.node;
+    let name = null;
+    if (p.isFunctionDeclaration() && node.id) name = node.id.name;
+    else if (node.id && node.id.type === 'Identifier' && node.init && (node.init.type === 'ArrowFunctionExpression' || node.init.type === 'FunctionExpression')) name = node.id.name;
+    if (!name) return;
+    declaredFunctions.push({ line: node.loc.start.line, name });
+  },
+});
+
 const pending = [];
 const applied = new Set();
 const stmtComments = new Map(); // VariableDeclaration 节点 → 注释数组
@@ -282,3 +296,15 @@ const out = banner + generate(ast, { comments: true, jsescOption: { minimal: tru
 fs.mkdirSync(OUT_DIR, { recursive: true });
 fs.writeFileSync(OUT, out);
 console.log(`已写出 ${OUT} (${out.length} 字符)`);
+
+// ── 命名覆盖率报告：上游发新版时据此补映射 ─────────────────────────────
+const unmapped = declaredFunctions.filter((f) => !(f.line in NAMES));
+console.log(
+  `函数总数 ${declaredFunctions.length}，已命名 ${declaredFunctions.length - unmapped.length}，未命名 ${unmapped.length}`,
+);
+if (unmapped.length) {
+  console.log('以下函数还没有名字（在上游新版本里通常是新增/挪动的函数，补到 NAMES 即可）：');
+  for (const f of unmapped) console.log(`  L${f.line}\t${f.name}`);
+  process.exitCode = 0; // 仅提示，不阻断 CI 的等价性校验
+}
+
