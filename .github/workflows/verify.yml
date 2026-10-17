@@ -37,7 +37,7 @@ jobs:
 
       - name: 安装还原工具依赖
         working-directory: tools
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       - name: AST alpha 等价性校验
         run: node tools/verify-alpha.mjs _worker.js plain/_worker.js

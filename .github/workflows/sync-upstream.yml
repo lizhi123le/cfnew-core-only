@@ -44,7 +44,7 @@ jobs:
 
       - name: 安装工具依赖
         working-directory: tools
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       - name: 拉取上游并判断是否有更新
         id: check
