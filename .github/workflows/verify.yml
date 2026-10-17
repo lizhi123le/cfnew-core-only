@@ -1,0 +1,85 @@
+name: verify-kernel
+
+# 守护两件事：
+#   1. plain/_worker.js 与上游压缩内核 _worker.js 语义等价（AST alpha 等价）
+#   2. 明文内核与 cfnew-panel 的接口契约一致（面板自带 55 项测试）
+# 触发：推送到核心分支、PR、每天定时巡检上游面板变化、手动。
+
+on:
+  push:
+    branches: [core-only]
+  pull_request:
+    branches: [core-only]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: verify-kernel-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ── 1. 明文内核 vs 压缩内核 ─────────────────────────────────────────────
+  alpha-equivalence:
+    name: 明文内核 alpha 等价
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: tools/package.json
+
+      - name: 安装还原工具依赖
+        working-directory: tools
+        run: npm install --no-audit --no-fund
+
+      - name: AST alpha 等价性校验
+        run: node tools/verify-alpha.mjs _worker.js plain/_worker.js
+
+      - name: 明文内核可由脚本确定性重建（防止手改漂移）
+        run: |
+          node tools/deobfuscate.mjs
+          git diff --exit-code -- plain/_worker.js
+        shell: bash
+
+      - name: 记录内核版本
+        run: |
+          version=$(node -e "console.log(require('fs').readFileSync('plain/_worker.js','utf8').match(/CORE_VERSION = \"([^\"]+)\"/)[1])")
+          echo "内核版本：$version" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # ── 2. 与面板的接口契约 ────────────────────────────────────────────────
+  panel-compat:
+    name: 面板接口契约（55 项）
+    runs-on: ubuntu-latest
+    needs: alpha-equivalence
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: 取面板（作者仓库最新 main）
+        run: git clone --depth 1 https://github.com/byJoey/cfnew-panel.git panel
+
+      - name: 面板 fixture 与本仓库内核是否同步（仅提示）
+        run: |
+          mine=$(sha256sum _worker.js | cut -d' ' -f1)
+          fixture=$(sha256sum panel/test/core-fixture.mjs 2>/dev/null | cut -d' ' -f1 || echo "missing")
+          echo "本仓库 _worker.js: $mine"
+          echo "面板 core-fixture: $fixture"
+          if [ "$mine" != "$fixture" ]; then
+            echo "::notice::面板 fixture 与本仓库内核不一致（面板可能已发布新内核），本条不阻断构建。"
+          fi
+
+      - name: 面板测试套件（内核指向明文版）
+        working-directory: panel
+        env:
+          CFNEW_TEST_CORE: ${{ github.workspace }}/plain/_worker.js
+        run: node --test src/test/*.test.mjs

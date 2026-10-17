@@ -1,5 +1,7 @@
 # 精简内核 · 明文化版本
 
+[![verify-kernel](https://github.com/lizhi123le/cfnew-core-only/actions/workflows/verify.yml/badge.svg)](https://github.com/lizhi123le/cfnew-core-only/actions/workflows/verify.yml)
+
 `plain/_worker.js` 是本仓库 `_worker.js`（`core-only` 分支发布产物）的**可读明文版本**：
 
 - 只做了三件事：格式化、按语义重命名标识符、补充中文注释。
@@ -41,6 +43,19 @@ node --test src/test/*.test.mjs
 - `/region`、`/test-api`、XHTTP 短路径与 `stream-one`、WebSocket 升级、家宽开关 `jk`；
 - 面板到 Worker 的转发/鉴权/缓存/绑定（`w` 变量）与 403/503 失败关闭行为。
 
+## CI 守护（.github/workflows/verify.yml）
+
+两条校验都在 GitHub Actions 上跑，公有仓库不计分钟数：
+
+| job | 内容 | 失败含义 |
+| --- | --- | --- |
+| `alpha-equivalence` | ① 明文与 `_worker.js` AST alpha 等价；② 重跑 `deobfuscate.mjs` 后 `plain/_worker.js` 无 diff | 有人手改了明文版，或它与压缩内核已经不同步 |
+| `panel-compat` | 拉取作者最新 [byJoey/cfnew-panel](https://github.com/byJoey/cfnew-panel)，用**明文内核**跑 55 项接口/订阅测试 | 面板契约变了，或明文版接口对不上 |
+
+触发：推送到 `core-only`、PR、每天 03:17 UTC 定时巡检（面板发布新版内核/改接口时，即使本仓库没动也会亮红）、手动 `workflow_dispatch`。
+
+面板 fixture 与 `_worker.js` 的哈希差异只作为 notice 提示（面板可能已升到新内核），不阻断构建；语义是否仍一致以 `panel-compat` 的测试结果为准。
+
 ## 接口契约（改这个文件时别动这些）
 
 | 路由（`a = /{uuid}`，`s = /{自定义路径 d}`） | 方法 | 说明 |
@@ -67,11 +82,12 @@ node --test src/test/*.test.mjs
 ## 目录
 
 ```
-_worker.js            # 上游压缩产物（原样，勿改）
-_worker.pretty.js     # prettier 格式化后的压缩产物（还原脚本的输入）
-plain/_worker.js      # 明文化版本（本文档描述的文件）
-tools/deobfuscate.mjs # 生成明文化版本（重命名 + 注释）
-tools/verify-alpha.mjs# AST alpha 等价性校验
-tools/skeleton.mjs    # 打印顶层结构（辅助命名）
-tools/functions.mjs   # 打印全部函数与嵌套关系（辅助命名）
+_worker.js                        # 上游压缩产物（原样，勿改）
+_worker.pretty.js                 # prettier 格式化后的压缩产物（还原脚本的输入）
+plain/_worker.js                  # 明文化版本（本文档描述的文件）
+tools/deobfuscate.mjs             # 生成明文化版本（重命名 + 注释）
+tools/verify-alpha.mjs            # AST alpha 等价性校验
+tools/skeleton.mjs                # 打印顶层结构（辅助命名）
+tools/functions.mjs               # 打印全部函数与嵌套关系（辅助命名）
+.github/workflows/verify.yml      # CI：alpha 等价 + 面板 55 项契约测试
 ```
