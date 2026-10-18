@@ -8,3 +8,4 @@ _worker.js.tmp
 pages.zip.tmp
 core.js
 dist/
+__pycache__/
