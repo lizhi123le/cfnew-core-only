@@ -1,7 +1,6 @@
 {
-  "seed": 1606253732,
-  "engine": "javascript-obfuscator",
-  "joPreset": "auto",
+  "seed": 2387845567,
+  "engine": "builtin",
   "mangle": "all",
   "escape": "budget",
   "noiseBytes": 4096,
