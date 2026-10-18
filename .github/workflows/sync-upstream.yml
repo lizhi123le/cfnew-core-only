@@ -2,10 +2,13 @@ name: kernel-pipeline
 
 # 仓库里唯一的自动化流水线（原 verify-kernel、release-kernel 都已并入）：
 #
-#   仓库被修改（push / PR） → 只跑校验：明文可重建 + 产物可重现 + alpha 等价 + 面板 55 项 × 2（明文/混淆）
-#   定时 / 手动            → 跑同步：merge 上游 → prettier → align → 重建明文
-#                            → 重新混淆（_worker.js + pages.zip）
+#   仓库被修改（push / PR） → 只跑校验：产物可重现 + alpha 等价 + 面板 55 项 × 2（明文/混淆）
+#   定时 / 手动            → 跑同步：merge 上游 → prettier（取上游压缩产物）→ align
+#                            → 上游明文与本地明文三方合并 → 重新混淆（_worker.js + pages.zip）
 #                            → 同样的校验 → 提交推送 → 发布 Release → 待命名则开 issue
+#
+# 注意：plain/_worker.js 是本仓库的源（可能含本地改动），校验不再从 _worker.pretty.js
+# 反向重建它；只有同步上游时才以上游压缩产物为输入，并把解出的上游明文与本仓库明文三方合并。
 #
 # 发布不再单独开工作流：同步任务里自带 release.sh（tag = CORE_VERSION + 明文内核内容哈希，
 # 内核内容不变就幂等跳过；版本号不变、内核代码变了也会发新 Release）。
@@ -61,11 +64,6 @@ jobs:
       - name: 安装工具依赖
         working-directory: tools
         run: npm ci --no-audit --no-fund
-
-      - name: 明文内核可由脚本确定性重建（防止手改漂移）
-        run: |
-          node tools/deobfuscate.mjs
-          git diff --exit-code -- plain/_worker.js
 
       - name: 校验（align 自测 + 混淆自测 + 产物可重现 + 面板 55 项 × 2）
         run: bash tools/check.sh
@@ -123,9 +121,13 @@ jobs:
           #   其他文件冲突仍然失败退出，交人工处理。
           bash tools/merge-upstream.sh "upstream/$UPSTREAM_BRANCH"
 
-      - name: 重新格式化内核（prettier，行号基准）
+      - name: 重新格式化上游内核（prettier，行号基准）
         if: steps.check.outputs.already == '0'
-        run: npx --yes "prettier@$PRETTIER" --parser babel --print-width 100 _worker.js > _worker.pretty.new.js
+        run: |
+          # 行号基准只取上游压缩产物：本仓库的 _worker.js 是由本地明文重新混淆的，
+          # 短名与上游不同，直接格式化会破坏 names.json 的对应关系。
+          git show "upstream/$UPSTREAM_BRANCH:_worker.js" > "$RUNNER_TEMP/upstream-worker.js"
+          npx --yes "prettier@$PRETTIER" --parser babel --print-width 100 "$RUNNER_TEMP/upstream-worker.js" > _worker.pretty.new.js
 
       - name: 命名对齐（把旧映射平移到新版）
         if: steps.check.outputs.already == '0'
@@ -134,9 +136,28 @@ jobs:
           mv _worker.pretty.new.js _worker.pretty.js
           cat align-report.md >> "$GITHUB_STEP_SUMMARY"
 
-      - name: 生成明文内核
+      - name: 上游明文与本地改动三方合并
         if: steps.check.outputs.already == '0'
-        run: node tools/deobfuscate.mjs
+        run: |
+          work="$RUNNER_TEMP/plain-merge"
+          mkdir -p "$work"
+          # base：旧上游明文（用对齐前的 pretty + names 解出，即本地改动之前的版本）
+          git show HEAD:_worker.pretty.js > "$work/pretty.old.js"
+          git show HEAD:tools/names.json > "$work/names.old.json"
+          git show HEAD:tools/comments.json > "$work/comments.old.json"
+          CFNEW_PRETTY="$work/pretty.old.js" \
+          CFNEW_NAMES="$work/names.old.json" \
+          CFNEW_COMMENTS="$work/comments.old.json" \
+          CFNEW_OUT="$work/base.js" node tools/deobfuscate.mjs
+          # ours：本仓库当前明文（可能含本地改动）；theirs：上游新内核解出的明文
+          cp plain/_worker.js "$work/ours.js"
+          CFNEW_OUT="$work/theirs.js" node tools/deobfuscate.mjs
+          if ! git merge-file -p "$work/ours.js" "$work/base.js" "$work/theirs.js" > "$work/merged.js"; then
+            echo "::error::plain/_worker.js 的本地改动与上游内核冲突，请手动合并后重跑同步（未写入工作区）。"
+            exit 1
+          fi
+          cp "$work/merged.js" plain/_worker.js
+          echo "上游明文已按 base/ours/theirs 三方合并，本地改动保留" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: 重新混淆（明文 → _worker.js + pages.zip）
         if: steps.check.outputs.already == '0'
@@ -159,7 +180,7 @@ jobs:
           version=$(node -e "console.log(require('fs').readFileSync('plain/_worker.js','utf8').match(/CORE_VERSION = \"([^\"]+)\"/)[1])")
           git commit -m "chore: 同步上游内核 $version（${{ steps.check.outputs.sha }}）
 
-          自动流程：merge 上游 → prettier → align → 明文重建 → 重新混淆（_worker.js + pages.zip）→ alpha 校验 → 面板 55 项测试（明文/混淆各一遍）"
+          自动流程：merge 上游 → prettier（取上游压缩产物）→ align → 上游明文与本地明文三方合并 → 重新混淆（_worker.js + pages.zip）→ alpha 校验 → 面板 55 项测试（明文/混淆各一遍）"
           git push origin "HEAD:$UPSTREAM_BRANCH"
           echo "pushed=1" >> "$GITHUB_OUTPUT"
           {

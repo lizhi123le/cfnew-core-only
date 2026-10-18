@@ -35,6 +35,11 @@ _worker.pretty.js ──deobfuscate──▶ plain/_worker.js ──obfuscate─
   用行号当锚点是因为压缩产物只有 1 行，prettier 格式化后每个函数/声明各占稳定的一行起头，
   行号天然唯一，人工核对和 `git diff` 都直观。改名交给 babel 的作用域分析（`scope.rename`），
   不做文本替换，所以不会碰到同名遮蔽、字符串误替换之类的问题。
+- **`plain/_worker.js` 是本仓库的可读源，可以带本地改动**：日常校验只检查「产物能由明文重现」
+  （`build-kernel --check`），不会反向要求明文等于 `deobfuscate(_worker.pretty.js)`。
+  只有同步上游时才以**上游 `_worker.js`**为 prettier 输入，解出上游明文后用 `git merge-file`
+  与本仓库明文做三方合并（base=旧上游明文，ours=本仓库明文，theirs=新上游明文），
+  本地改动与上游改动都保留；冲突则中止同步、交人工处理。
 
 ## 混淆参数
 

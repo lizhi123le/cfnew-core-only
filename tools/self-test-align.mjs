@@ -34,7 +34,8 @@ for (const line of lines) {
     continue;
   }
   // 2) 改版本号：模块常量值变化不应破坏实体匹配
-  if (!versionBumped && /^const ht = "[^"]+",?$/.test(line)) {
+  //    上游压缩产物的短名是随机的（ht / rt / j$ …），按"版本号形态"匹配，不写死变量名。
+  if (!versionBumped && /^const [A-Za-z_$][\w$]* = "\d{4}\.\d{1,2}\.\d{1,2}\.\d{1,3}",?$/.test(line)) {
     simulated.push(line.replace(/"[^"]+"/, '"2099.01.01.1"'));
     versionBumped = true;
     continue;
