@@ -1,0 +1,144 @@
+name: kernel-obfuscate
+
+# 混淆工作流：明文（源） → 发布产物（替换现有文件）
+#
+#   plain/_worker.js（可读源） ──build-kernel.mjs──▶ _worker.js + pages.zip
+#
+#   仓库被修改（push / PR） → 只校验：产物必须能由明文逐字节重现（防止手改产物或忘记构建）
+#   手动 dispatch          → 重新生成并提交回 core-only（可关闭提交只看报告）
+#
+# 与 sync-upstream.yml 的分工：
+#   sync-upstream 走「上游压缩产物 → 明文」（解码方向）；
+#   本工作流走「明文 → 发布产物」（编码方向），真正替换 _worker.js 与 pages.zip。
+#   两个方向都以 tools/build-kernel.mjs 为唯一出口，所以 _worker.js / pages.zip 不再手改。
+
+on:
+  push:
+    branches: [core-only]
+    paths:
+      - "plain/**"
+      - "_worker.pretty.js"
+      - "_worker.js"
+      - "pages.zip"
+      - "tools/**"
+      - ".github/workflows/obfuscate.yml"
+  pull_request:
+    branches: [core-only]
+    paths:
+      - "plain/**"
+      - "_worker.pretty.js"
+      - "_worker.js"
+      - "pages.zip"
+      - "tools/**"
+      - ".github/workflows/obfuscate.yml"
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "构建后把 _worker.js / pages.zip 提交回 core-only"
+        type: boolean
+        default: true
+      randomize:
+        description: "强制换新种子（写模式默认已随机；保留用于显式表达）"
+        type: boolean
+        default: false
+      engine:
+        description: "混淆引擎（记录进 obfuscate.seed.json，后续 --check 自动沿用）"
+        type: choice
+        options: [builtin, javascript-obfuscator]
+        default: builtin
+      joPreset:
+        description: "javascript-obfuscator 预设（auto=按体积预算自动调参；light/balanced 不做体积控制）"
+        type: choice
+        options: [auto, light, balanced]
+        default: auto
+
+permissions:
+  contents: write
+
+concurrency:
+  group: kernel-obfuscate-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+jobs:
+  # ── 校验：仓库被修改时跑（push / PR）────────────────────────────────────
+  verify:
+    name: 校验（_worker.js / pages.zip 可由明文重现）
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: tools/package.json
+
+      - name: 安装工具依赖
+        working-directory: tools
+        run: npm ci --no-audit --no-fund
+
+      - name: 混淆链路自测（反向映射 + alpha + 确定性 + ZIP）
+        run: node tools/self-test-obfuscate.mjs
+
+      - name: 产物必须与明文一致
+        run: node tools/build-kernel.mjs --check
+
+      - name: 记录内核版本
+        run: |
+          version=$(node -e "console.log(require('fs').readFileSync('plain/_worker.js','utf8').match(/CORE_VERSION = \"([^\"]+)\"/)[1])")
+          echo "内核版本：$version" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "产物大小：$(wc -c < _worker.js) 字节（_worker.js），$(wc -c < pages.zip) 字节（pages.zip）" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # ── 重建：手动触发，生成并替换现有产物 ─────────────────────────────────
+  rebuild:
+    name: 重新混淆并替换产物（dispatch）
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: core-only
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: 安装工具依赖
+        working-directory: tools
+        run: npm ci --no-audit --no-fund
+
+      - name: 从明文重新生成 _worker.js 与 pages.zip
+        run: |
+          args="--engine=${{ inputs.engine }} --jo-preset=${{ inputs.joPreset }}"
+          if [ "${{ inputs.randomize }}" = "true" ]; then
+            args="$args --randomize"
+          fi
+          node tools/build-kernel.mjs $args
+
+      - name: 提交并推送
+        if: ${{ inputs.commit }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add _worker.js pages.zip
+          if [ -f tools/obfuscate.seed.json ]; then git add tools/obfuscate.seed.json; fi
+          if git diff --cached --quiet; then
+            echo "产物与明文已经一致，不产生提交" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          version=$(node -e "console.log(require('fs').readFileSync('plain/_worker.js','utf8').match(/CORE_VERSION = \"([^\"]+)\"/)[1])")
+          git commit -m "chore: 由明文重新混淆内核 $version
+
+          自动流程：obfuscate 随机改名/转义/噪音 → alpha 等价 → 字符串值一致 → 版本校验 → 重写 _worker.js + pages.zip"
+          git push origin "HEAD:core-only"
+          {
+            echo "已提交：$(git rev-parse --short HEAD)"
+            echo "内核版本：$version"
+            echo "产物：_worker.js、pages.zip（均与 plain/_worker.js alpha 等价）"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: 仅校验（commit=false）
+        if: ${{ !inputs.commit }}
+        run: echo "commit=false：只校验产物，不提交（工作区改动不会推送）" | tee -a "$GITHUB_STEP_SUMMARY"

@@ -1,6 +1,6 @@
 # CFnew 精简内核
 
-内核 37,806 字节，较原完整版本减少约 92%。Worker 负责代理转发和 KV 配置。页面、优选列表处理与订阅生成由独立面板提供。
+内核 39,432 字节（混淆后、单行；含随机转义与惰性噪音），较原完整版本减少约 92%。Worker 负责代理转发和 KV 配置。页面、优选列表处理与订阅生成由独立面板提供。
 
 **面板：[https://cfnew.xy.kg/](https://cfnew.xy.kg/)**
 
@@ -31,6 +31,44 @@
 Worker 首页返回 `hello`。Worker 原来的页面和 `/sub` 路径已经移出，订阅必须使用面板生成的新地址。
 
 在入口页选择已保存的节点后，可点击“删除所选”。记录只从当前浏览器删除，Worker 配置保持不变。
+
+## 开发：从明文重新混淆
+
+仓库根目录的 `_worker.js` 和 `pages.zip` 都是构建产物，唯一的源是 `plain/_worker.js`（可读、混淆核与它逐 AST 等价）。
+
+混淆在反向改名的基础上加入了可重现的随机性：
+
+- **随机短名**：全部绑定用种子 PRNG 生成新名字，按作用域链复用 1–2 字符名（产物体积接近原始压缩版）；
+- **字符串转义**：路由、配置字段名等字面量改写成随机 `\xHH` / `\uHHHH`，运行时值不变；
+- **惰性噪音**：末尾追加未被引用的函数声明（不执行），与正文拼在同一行。
+
+默认 `escape=budget`、`target-size=39500`：先隐藏路由/配置字段，剩余预算分给随机字符串与噪音，
+产物固定为**单行**并落在 **32–42 KB（37±5 KB）**；超界会直接构建失败。
+
+**默认每次构建都会换新随机种子**（builtin 与 javascript-obfuscator 两个引擎一致），所以重复构建得到不同产物；
+用到的种子会写进 `tools/obfuscate.seed.json`，`--check` 据此逐字节复现，CI 仍然可校验。
+想要可复现构建时用 `--reuse-seed` 或 `--seed N`。
+
+```powershell
+cd tools
+npm install
+node build-kernel.mjs              # 默认换新随机种子，生成并替换 _worker.js + pages.zip
+node build-kernel.mjs --reuse-seed # 沿用记录里的种子（可复现构建）
+node build-kernel.mjs --check      # 只校验产物是否等于「明文 + 记录里的种子」（CI 也跑这个）
+node build-kernel.mjs --dry-run    # 只看差异，不写文件
+node build-kernel.mjs --seed 12345 # 显式指定种子（会记录）
+node build-kernel.mjs --target-size=38000            # 体积目标可调（默认 39500）
+node build-kernel.mjs --escape=partial --noise=2048  # 或显式控制转义/噪音（不保证体积区间）
+node build-kernel.mjs --engine=javascript-obfuscator --jo-preset=auto   # 改用官方混淆器参数（auto 按体积预算调参）
+bash check.sh                      # 五道硬门槛：align + 混淆自测 + 产物可重现 + 面板 55 项（明文/混淆各一遍）
+```
+
+写文件前会强制校验：AST alpha 等价、所有字符串值逐个相同、版本常量一致、默认导出存在、噪音惰性；
+另外两种引擎都会跑内置的「运行时契约探针」（`/`=hello、`/api/config` 的 coreVersion 与字段、`/region`、404）。
+面板 55 项测试会同时跑在 `plain/_worker.js` 和 `_worker.js` 上，接口路径、配置字段与六种订阅都按真实请求验证。
+可选引擎 `javascript-obfuscator`（`auto` / `light` / `balanced` 预设，`auto` 会用体积预算搜索参数并落在 37±5 KB；参数可写进 `tools/obfuscator.config.json`）无法做
+alpha 静态证明，因此只以运行时探针 + 面板 55 项为准；默认引擎仍是零运行时开销的内置引擎。详见
+[tools/README.md](./tools/README.md)。
 
 ## 自定义路径登录
 

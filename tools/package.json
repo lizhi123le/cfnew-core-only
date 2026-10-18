@@ -2,16 +2,25 @@
   "name": "cfnew-core-only-tools",
   "private": true,
   "type": "module",
-  "description": "把精简内核的压缩产物还原成可读明文，并校验语义等价",
+  "description": "把精简内核的压缩产物解码成可读明文，再从明文混淆成发布产物（内置引擎或 javascript-obfuscator）并校验语义与面板契约",
   "scripts": {
     "deobfuscate": "node deobfuscate.mjs",
+    "obfuscate": "node obfuscate.mjs",
+    "build": "node build-kernel.mjs",
+    "build:check": "node build-kernel.mjs --check",
+    "build:dry": "node build-kernel.mjs --dry-run",
+    "build:jo": "node build-kernel.mjs --engine=javascript-obfuscator",
+    "build:jo:balanced": "node build-kernel.mjs --engine=javascript-obfuscator --jo-preset=balanced",
+    "randomize": "node build-kernel.mjs --randomize",
     "verify": "node verify-alpha.mjs ../_worker.js ../plain/_worker.js",
-    "skeleton": "node skeleton.mjs ../_worker.pretty.js",
-    "functions": "node functions.mjs ../_worker.pretty.js"
+    "test": "node self-test-align.mjs && node self-test-obfuscate.mjs",
+    "structure": "node structure.mjs ../_worker.pretty.js",
+    "functions": "node structure.mjs ../_worker.pretty.js --functions"
   },
   "devDependencies": {
     "@babel/generator": "7.29.8",
     "@babel/parser": "7.29.9",
-    "@babel/traverse": "7.29.10"
+    "@babel/traverse": "7.29.10",
+    "javascript-obfuscator": "5.9.0"
   }
 }

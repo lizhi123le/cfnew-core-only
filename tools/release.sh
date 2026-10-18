@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # 按 plain/_worker.js 里的 CORE_VERSION 发布内核 Release：
-#   - _worker.js        官方压缩/混淆内核（可直接部署）
-#   - _worker.plain.js  明文内核（可读、可审计，与上一行 alpha 等价）
+#   - _worker.js        由明文混淆生成的内核（随机短名 + 转义字符串 + 惰性噪音，可直接部署）
+#   - _worker.plain.js  明文内核（可读、可审计，混淆核与它逐 AST 等价）
 #   - pages.zip         Cloudflare Pages 直传包（仓库里有才带）
 #   - SHA256SUMS.txt    校验和
 #
-# 版本号唯一来源：plain/_worker.js 的 `const CORE_VERSION = "x.y.z"`，
-# 并与 _worker.js 里的 `const ht="x.y.z"` 交叉校验，不一致直接失败。
+# 版本号唯一来源：plain/_worker.js 的 `const CORE_VERSION = "x.y.z"`。
+# 产物里的版本常量名可能被随机化，所以不再按固定名字 grep；写文件前会用
+# tools/build-kernel.mjs --check 校验「产物 = 明文 + 种子」（依赖已安装时）。
 #
 # 用法：
 #   bash tools/release.sh --check      # 输出 TAG=... EXISTS=0/1（供 GH Actions 读取）
@@ -33,13 +34,8 @@ read_version() {
     const plain = fs.readFileSync("plain/_worker.js", "utf8");
     const core = fs.readFileSync("_worker.js", "utf8");
     const p = plain.match(/const CORE_VERSION = "([^"]+)"/);
-    const c = core.match(/const ht ?= ?"([^"]+)"/);
     if (!p) { console.error("plain/_worker.js 里找不到 CORE_VERSION"); process.exit(1); }
-    if (!c) { console.error("_worker.js 里找不到版本常量 ht"); process.exit(1); }
-    if (p[1] !== c[1]) {
-      console.error(`版本不一致：明文 ${p[1]} ≠ 压缩 ${c[1]}`);
-      process.exit(1);
-    }
+    if (core.length < 1000) { console.error("_worker.js 缺失或异常（构建产物没提交？）"); process.exit(1); }
     console.log(p[1]);
   '
 }
@@ -61,6 +57,15 @@ fi
 if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
   echo "Release $TAG 已存在，跳过（幂等）"
   exit 0
+fi
+
+# 发布前再确认一次：仓库里的 _worker.js / pages.zip 必须等于「明文 + 当前种子」的产物。
+# 依赖没装（本地裸跑）时跳过，CI 里一定装了。
+if [ -d tools/node_modules/@babel/parser ]; then
+  echo "校验产物与明文一致…"
+  node tools/build-kernel.mjs --check
+else
+  echo "（未安装 tools 依赖，跳过 build-kernel --check）"
 fi
 
 DIST="dist"
@@ -95,8 +100,8 @@ else
 
 | 资产 | 用途 |
 | --- | --- |
-| \`_worker.js\` | 官方压缩/混淆内核，**推荐部署**（Workers 直接上传，或放进 Pages 直传包） |
-| \`_worker.plain.js\` | 明文内核：仅格式化 + 语义重命名，逻辑与 \`_worker.js\` 逐 AST 等价 |
+| \`_worker.js\` | 由明文混淆生成的内核（随机短名 + 转义字符串 + 惰性噪音），**推荐部署**（Workers 直接上传，或放进 Pages 直传包） |
+| \`_worker.plain.js\` | 明文内核：仅格式化 + 语义重命名，混淆核与它逐 AST 等价 |
 | \`pages.zip\` | Cloudflare Pages 直接上传用（根目录只有 \`_worker.js\`） |
 | \`SHA256SUMS.txt\` | 上述文件的 SHA-256 |
 

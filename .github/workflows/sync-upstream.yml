@@ -2,12 +2,16 @@ name: kernel-pipeline
 
 # 仓库里唯一的自动化流水线（原 verify-kernel、release-kernel 都已并入）：
 #
-#   仓库被修改（push / PR） → 只跑校验：明文可重建 + alpha 等价 + 面板 55 项
+#   仓库被修改（push / PR） → 只跑校验：明文可重建 + 产物可重现 + alpha 等价 + 面板 55 项 × 2（明文/混淆）
 #   定时 / 手动            → 跑同步：merge 上游 → prettier → align → 重建明文
+#                            → 重新混淆（_worker.js + pages.zip）
 #                            → 同样的校验 → 提交推送 → 发布 Release → 待命名则开 issue
 #
 # 发布不再单独开工作流：同步任务里自带 release.sh（幂等，同名 tag 直接跳过）。
 # 没有"每天固定时间"的巡检：要么仓库有变更，要么到了每周同步时间，否则不跑。
+#
+# 编码方向（明文 → _worker.js + pages.zip）也有独立工作流 obfuscate.yml：
+# 本文件负责"上游 → 明文"，它负责"明文 → 发布产物"，两边共用 tools/build-kernel.mjs。
 
 on:
   push:
@@ -41,7 +45,7 @@ env:
 jobs:
   # ── 校验：仓库内容被修改时跑（push / PR） ───────────────────────────────
   verify:
-    name: 校验（align 自测 + alpha + 面板 55 项）
+    name: 校验（align 自测 + 混淆自测 + 产物可重现 + 面板 55 项 × 2）
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
@@ -62,7 +66,7 @@ jobs:
           node tools/deobfuscate.mjs
           git diff --exit-code -- plain/_worker.js
 
-      - name: 校验（align 自测 + alpha 等价 + 面板 55 项）
+      - name: 校验（align 自测 + 混淆自测 + 产物可重现 + 面板 55 项 × 2）
         run: bash tools/check.sh
 
       - name: 记录内核版本
@@ -111,6 +115,16 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # _worker.js / pages.zip 现在是本仓库的构建产物（由 plain/_worker.js 经 build-kernel 生成），
+          # 但上游新版压缩内核仍然是"解码输入"。先把它们取成上游版本并单独提交，
+          # 合并时这两个文件就不再是"双方都改过"，不会冲突；随后再由 build-kernel 重新生成。
+          git checkout "upstream/$UPSTREAM_BRANCH" -- _worker.js
+          if git cat-file -e "upstream/$UPSTREAM_BRANCH:pages.zip" 2>/dev/null; then
+            git checkout "upstream/$UPSTREAM_BRANCH" -- pages.zip
+          fi
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: 取上游压缩产物 ${{ steps.check.outputs.sha }} 作为解码输入"
+          fi
           if ! git merge --no-edit "upstream/$UPSTREAM_BRANCH" -m "merge: 上游 $UPSTREAM_BRANCH @ ${{ steps.check.outputs.sha }}"; then
             echo "::error::上游改动与本仓库冲突，需要手动解决后重新运行"
             git merge --abort || true
@@ -132,7 +146,11 @@ jobs:
         if: steps.check.outputs.already == '0'
         run: node tools/deobfuscate.mjs
 
-      - name: 校验（align 自测 + alpha 等价 + 面板 55 项）
+      - name: 重新混淆（明文 → _worker.js + pages.zip）
+        if: steps.check.outputs.already == '0'
+        run: node tools/build-kernel.mjs
+
+      - name: 校验（align 自测 + 混淆自测 + 产物可重现 + 面板 55 项 × 2）
         if: steps.check.outputs.already == '0'
         run: bash tools/check.sh
 
@@ -149,7 +167,7 @@ jobs:
           version=$(node -e "console.log(require('fs').readFileSync('plain/_worker.js','utf8').match(/CORE_VERSION = \"([^\"]+)\"/)[1])")
           git commit -m "chore: 同步上游内核 $version（${{ steps.check.outputs.sha }}）
 
-          自动流程：merge 上游 → prettier → align → 明文重建 → alpha 校验 → 面板 55 项测试"
+          自动流程：merge 上游 → prettier → align → 明文重建 → 重新混淆（_worker.js + pages.zip）→ alpha 校验 → 面板 55 项测试（明文/混淆各一遍）"
           git push origin "HEAD:$UPSTREAM_BRANCH"
           echo "pushed=1" >> "$GITHUB_OUTPUT"
           {

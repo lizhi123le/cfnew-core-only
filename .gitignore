@@ -4,4 +4,7 @@ tmp/
 align-report.md
 _worker.pretty.new.js
 _worker.pretty.simulated.js
+_worker.js.tmp
+pages.zip.tmp
+core.js
 dist/
