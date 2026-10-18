@@ -119,6 +119,7 @@ jobs:
           # 细节见 tools/merge-upstream.sh：
           #   _worker.js / pages.zip 先取上游（解码输入）并单独提交，合并时不再冲突；
           #   README.md / .gitignore 的冲突按本仓库自有内容自动解决；
+          #   .github/ 保持本仓库版本（不并入上游 workflow，否则 GITHUB_TOKEN 推送会被拒）；
           #   其他文件冲突仍然失败退出，交人工处理。
           bash tools/merge-upstream.sh "upstream/$UPSTREAM_BRANCH"
 

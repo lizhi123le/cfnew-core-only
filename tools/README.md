@@ -138,7 +138,7 @@ node build-kernel.mjs --engine=builtin            # 切回默认
 | `verify-alpha.mjs` | **等价校验**：两份源码所有绑定统一改名为 `c0、c1…`，抹掉注释/位置/字面量写法后逐字符比较。对**混淆核**（不含噪音）使用；`build-kernel --check` 已内置 |
 | `check.sh` | 一道命令跑完五道硬门槛：align 自测 + 混淆自测 + 产物可重现 + 面板 55 项（明文）+ 面板 55 项（混淆产物） |
 | `release.sh` | 按 `plain/_worker.js` 的 `CORE_VERSION` 打包并发布 Release；发布前会跑 `build-kernel --check` |
-| `merge-upstream.sh` | **同步上游**：先把上游 `_worker.js` / `pages.zip` 提交为解码输入，再合并上游分支。`README.md` 冲突段落保留本仓库版本、`.gitignore` 取双方并集，其余文件冲突中止并交人工 |
+| `merge-upstream.sh` | **同步上游**：先把上游 `_worker.js` / `pages.zip` 提交为解码输入，再合并上游分支。`README.md` 冲突段落保留本仓库版本、`.gitignore` 取双方并集、`.github/` 始终保留本仓库版本（不并入上游 CI），其余文件冲突中止并交人工 |
 | `self-test-align.mjs` | align 的回归自测：造「行号整体下移 + 版本号变更」的假升级版，断言命名 100% 继承 |
 | `self-test-obfuscate.mjs` | 混淆链路自测：反向映射、alpha、字符串值、种子确定性、三种 mangle、噪音惰性、import 原文、ZIP 往返、javascript-obfuscator 引擎、体积预算与单行格式 |
 | `structure.mjs` | 看结构辅助命名：默认打印顶层声明，加 `--functions` 打印全部函数（含嵌套层级） |
@@ -188,7 +188,8 @@ node structure.mjs --functions     # 全部函数（含嵌套）
 
 ```
 tools/merge-upstream.sh（上游 _worker.js/pages.zip 先单独提交为解码输入；
-  README.md / .gitignore 的冲突按本仓库自有内容自动解决，其余冲突中止交人工）
+  README.md / .gitignore 的冲突按本仓库自有内容自动解决；.github/ 保持本仓库版本，
+  不并入上游 workflow；其余冲突中止交人工）
   → prettier 重新生成 _worker.pretty.js（新行号基准）
   → align.mjs 把旧命名平移到新行号（结构指纹 + LCS，内层函数增删不影响外层命名）
   → deobfuscate.mjs 生成新的 plain/_worker.js
