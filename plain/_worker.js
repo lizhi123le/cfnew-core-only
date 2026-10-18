@@ -393,7 +393,7 @@ function createRequestHandler(A) {
   }
   /*IPv4/IPv6 字面量校验。*/
   function isIpAddress(e) {
-    return !!(/^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/.test(e) || /^(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$/.test(e) || /^::1$|^::$|^(?:[0-9a-fA-F]{1,4}:)*::(?:[0-9a-fA-F]{1,4}:)*[0-9a-fA-F]{1,4}$/.test(e));
+    return !!(/^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/.test(e) || /^(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$/.test(e) || /^(?:[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){0,6})?::(?:[0-9a-fA-F]{1,4})?$/.test(e));
   }
   /*ALPN 白名单归一化（h3 / h2 / http/1.1 及其组合）。*/
   function normalizeAlpn(e) {
@@ -1834,25 +1834,33 @@ function createRequestHandler(A) {
             });
             continue;
           }
-          const h = i.port || 443,
-            l = i.name || `API优选-${i.ip}:${h}`;
-          if (!isIpAddress(i.ip) && !isDomainName(i.ip)) {
+          const 输入地址 = String(i.ip).trim().replace(/^\[([^\]]+)\]$/, "$1"),
+            h = i.port === void 0 || i.port === null || i.port === "" ? 443 : parseInt(i.port, 10),
+            l = String(i.name || "").replace(/[#,\r\n]/g, " ").trim() || `API优选-${输入地址}:${h}`;
+          if (!isIpAddress(输入地址) && !isDomainName(输入地址)) {
             f.push({
               ip: i.ip,
               reason: "无效的IP或域名格式"
             });
             continue;
           }
-          if (a.some(p => p.ip === i.ip && p.port === h)) {
+          if (!Number.isInteger(h) || h < 1 || h > 65535) {
+            f.push({
+              ip: 输入地址,
+              reason: "无效的端口: " + i.port
+            });
+            continue;
+          }
+          if (a.some(p => p.ip === 输入地址 && p.port === h)) {
             u.push({
-              ip: i.ip,
+              ip: 输入地址,
               port: h,
               reason: "已存在"
             });
             continue;
           }
           const d = {
-            ip: i.ip,
+            ip: 输入地址,
             port: h,
             name: l,
             addedAt: new Date().toISOString()
@@ -2019,6 +2027,7 @@ function createRequestHandler(A) {
         address: s,
         port: u
       } = parseHostPort(a);
+      if (!s || !isIpAddress(s) && !isDomainName(s)) continue;
       o || (o = s + (u ? ":" + u : "")), t.push({
         ip: s,
         port: u || 443,
@@ -2028,11 +2037,12 @@ function createRequestHandler(A) {
     }
     return t;
   }
-  /*把优选列表序列化回字符串。*/
+  /*把优选列表序列化回字符串（IPv6 补方括号，备注去掉分隔符）。*/
   function serializePreferredList(e) {
     return !e || e.length === 0 ? "" : e.map(n => {
-      const t = n.port || 443;
-      return `${n.ip}:${t}#${n.name}`;
+      const t = n.port || 443,
+        a = n.ip && n.ip.includes(":") && !n.ip.startsWith("[") ? `[${n.ip}]` : n.ip;
+      return `${a}:${t}#${String(n.name || "").replace(/[#,\r\n]/g, " ").trim()}`;
     }).join(",");
   }
   /*域名格式校验。*/
