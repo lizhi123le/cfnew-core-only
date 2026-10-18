@@ -7,7 +7,8 @@ name: kernel-pipeline
 #                            → 重新混淆（_worker.js + pages.zip）
 #                            → 同样的校验 → 提交推送 → 发布 Release → 待命名则开 issue
 #
-# 发布不再单独开工作流：同步任务里自带 release.sh（幂等，同名 tag 直接跳过）。
+# 发布不再单独开工作流：同步任务里自带 release.sh（tag = CORE_VERSION + 明文内核内容哈希，
+# 内核内容不变就幂等跳过；版本号不变、内核代码变了也会发新 Release）。
 # 没有"每天固定时间"的巡检：要么仓库有变更，要么到了每周同步时间，否则不跑。
 #
 # 编码方向（明文 → _worker.js + pages.zip）也有独立工作流 obfuscate.yml：
@@ -110,26 +111,16 @@ jobs:
             echo "上游领先 $behind 个提交（$sha），开始同步" | tee -a "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: 合并上游
+      - name: 合并上游（压缩产物取上游，文档冲突自动解决）
         if: steps.check.outputs.already == '0' && steps.check.outputs.behind != '0'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # _worker.js / pages.zip 现在是本仓库的构建产物（由 plain/_worker.js 经 build-kernel 生成），
-          # 但上游新版压缩内核仍然是"解码输入"。先把它们取成上游版本并单独提交，
-          # 合并时这两个文件就不再是"双方都改过"，不会冲突；随后再由 build-kernel 重新生成。
-          git checkout "upstream/$UPSTREAM_BRANCH" -- _worker.js
-          if git cat-file -e "upstream/$UPSTREAM_BRANCH:pages.zip" 2>/dev/null; then
-            git checkout "upstream/$UPSTREAM_BRANCH" -- pages.zip
-          fi
-          if ! git diff --cached --quiet; then
-            git commit -m "chore: 取上游压缩产物 ${{ steps.check.outputs.sha }} 作为解码输入"
-          fi
-          if ! git merge --no-edit "upstream/$UPSTREAM_BRANCH" -m "merge: 上游 $UPSTREAM_BRANCH @ ${{ steps.check.outputs.sha }}"; then
-            echo "::error::上游改动与本仓库冲突，需要手动解决后重新运行"
-            git merge --abort || true
-            exit 1
-          fi
+          # 细节见 tools/merge-upstream.sh：
+          #   _worker.js / pages.zip 先取上游（解码输入）并单独提交，合并时不再冲突；
+          #   README.md / .gitignore 的冲突按本仓库自有内容自动解决；
+          #   其他文件冲突仍然失败退出，交人工处理。
+          bash tools/merge-upstream.sh "upstream/$UPSTREAM_BRANCH"
 
       - name: 重新格式化内核（prettier，行号基准）
         if: steps.check.outputs.already == '0'
@@ -176,8 +167,10 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 发布内核 Release（明文 + 混淆）
-        # 不依赖这次是否真的推了提交：dispatch 手动改过内核后也走这里，
-        # release.sh 自身幂等（同名 tag 已存在就跳过），不会重复发布。
+        # 不依赖这次是否真的推了提交：dispatch 手动改过内核后也走这里。
+        # tag = CORE_VERSION + 明文内核内容哈希（plain/_worker.js 的 sha256 前 10 位）。
+        # 内核内容不变（只换混淆种子 / 只改文档）就幂等跳过；
+        # 版本号没变但内核代码变了，哈希不同 → 发新 Release，旧版本保留。
         if: steps.check.outputs.already == '0'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -186,7 +179,7 @@ jobs:
           bash tools/release.sh
           {
             echo ""
-            echo "已按 CORE_VERSION 发布内核 $tag（已存在则跳过）"
+            echo "已发布内核 $tag（tag = CORE_VERSION + 明文内核内容哈希；内容相同则跳过）"
             echo "资产：_worker.js（压缩/混淆）、_worker.plain.js（明文）、pages.zip、SHA256SUMS.txt"
           } >> "$GITHUB_STEP_SUMMARY"
 

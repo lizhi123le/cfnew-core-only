@@ -6,11 +6,15 @@
 #   - SHA256SUMS.txt    校验和
 #
 # 版本号唯一来源：plain/_worker.js 的 `const CORE_VERSION = "x.y.z"`。
+# Release 的 tag 是「版本号-明文内核内容哈希」（如 2026.10.17.2-9f86d08188）：
+#   后缀取 plain/_worker.js 内容的 sha256 前 10 位，只换混淆种子 / 只改文档都不会变；
+#   CORE_VERSION 或内核代码变了才会发新 Release，旧版本保留，不会因为同名 tag 已存在而跳过；
+#   内核内容相同则重复运行幂等（tag 相同 → 跳过）。
 # 产物里的版本常量名可能被随机化，所以不再按固定名字 grep；写文件前会用
 # tools/build-kernel.mjs --check 校验「产物 = 明文 + 种子」（依赖已安装时）。
 #
 # 用法：
-#   bash tools/release.sh --check      # 输出 TAG=... EXISTS=0/1（供 GH Actions 读取）
+#   bash tools/release.sh --check      # 输出 TAG=版本号-内容哈希、EXISTS=0/1（供 GH Actions 读取）
 #   bash tools/release.sh --dry-run    # 本地演练，不调用 gh
 #   bash tools/release.sh              # 真正创建 Release（需要 gh + GH_TOKEN）
 set -euo pipefail
@@ -41,7 +45,11 @@ read_version() {
 }
 
 VERSION="$(read_version)" || { echo "::error::读取内核版本失败" >&2; exit 1; }
-TAG="${TAG_PREFIX}${VERSION}"
+# 发布对象取自 HEAD，所以后缀也哈希「已提交的明文内核」：
+# 只换混淆种子 / 只改文档不会变，内核代码（含 CORE_VERSION）变了才变。
+COMMIT="$(git rev-parse --short HEAD)"
+KERNEL_SHA="$(git show HEAD:plain/_worker.js | sha256sum | cut -c1-10)"
+TAG="${TAG_PREFIX}${VERSION}-${KERNEL_SHA}"
 
 if [ "$MODE" = "--check" ]; then
   if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
@@ -94,7 +102,7 @@ if [ -n "$NOTES" ] && [ -f "$NOTES" ]; then
 else
   NOTES_FILE="$(mktemp)"
   cat > "$NOTES_FILE" <<EOF
-## 内核 $VERSION
+## 内核 $VERSION ($KERNEL_SHA)
 
 配套面板版本：**$VERSION**（面板会拿 \`coreVersion\` 与自己的发布版本比对，不一致就提示"内核需要更新"）。
 
@@ -107,7 +115,7 @@ else
 
 ### 校验与来源
 
-- 本次发布来自 \`core-only\` 分支提交 \`$(git rev-parse --short HEAD)\`。
+- 本次发布来自 \`core-only\` 分支提交 \`$COMMIT\`；tag 后缀 \`$KERNEL_SHA\` 是已提交明文内核 \`plain/_worker.js\` 的内容哈希（sha256 前 10 位，按仓库里的内容计算，不受本地换行符影响）。
 - 明文版通过 AST alpha 等价校验（与 \`_worker.js\` 除标识符/格式/注释外完全一致）。
 - 明文版通过 \`cfnew-panel\` 全部 55 项接口/订阅测试（首页、配置 API、优选 IP API、六种订阅、XHTTP、WebSocket、家宽开关等）。
 - 版本号取自 \`plain/_worker.js\` 的 \`CORE_VERSION\`，并与 \`_worker.js\` 内的版本常量交叉核对。
@@ -124,7 +132,7 @@ echo "准备发布 $TAG："
 ls -lh "$DIST"
 
 if [ "$MODE" = "--dry-run" ]; then
-  echo "[dry-run] gh release create $TAG --title '内核 $VERSION' --notes-file $NOTES_FILE ..."
+  echo "[dry-run] gh release create $TAG --title '内核 $VERSION ($KERNEL_SHA)' --notes-file $NOTES_FILE ..."
   echo "--- 发布说明 ---"
   cat "$NOTES_FILE"
   exit 0
@@ -135,7 +143,7 @@ gh release create "$TAG" --repo "$REPO" \
   "$DIST/_worker.plain.js" \
   "$DIST/pages.zip" \
   "$DIST/SHA256SUMS.txt" \
-  --title "内核 $VERSION" \
+  --title "内核 $VERSION ($KERNEL_SHA)" \
   --notes-file "$NOTES_FILE" \
   --target "$(git rev-parse HEAD)" \
   --latest

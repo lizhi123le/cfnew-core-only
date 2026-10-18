@@ -138,6 +138,7 @@ node build-kernel.mjs --engine=builtin            # 切回默认
 | `verify-alpha.mjs` | **等价校验**：两份源码所有绑定统一改名为 `c0、c1…`，抹掉注释/位置/字面量写法后逐字符比较。对**混淆核**（不含噪音）使用；`build-kernel --check` 已内置 |
 | `check.sh` | 一道命令跑完五道硬门槛：align 自测 + 混淆自测 + 产物可重现 + 面板 55 项（明文）+ 面板 55 项（混淆产物） |
 | `release.sh` | 按 `plain/_worker.js` 的 `CORE_VERSION` 打包并发布 Release；发布前会跑 `build-kernel --check` |
+| `merge-upstream.sh` | **同步上游**：先把上游 `_worker.js` / `pages.zip` 提交为解码输入，再合并上游分支。`README.md` 冲突段落保留本仓库版本、`.gitignore` 取双方并集，其余文件冲突中止并交人工 |
 | `self-test-align.mjs` | align 的回归自测：造「行号整体下移 + 版本号变更」的假升级版，断言命名 100% 继承 |
 | `self-test-obfuscate.mjs` | 混淆链路自测：反向映射、alpha、字符串值、种子确定性、三种 mangle、噪音惰性、import 原文、ZIP 往返、javascript-obfuscator 引擎、体积预算与单行格式 |
 | `structure.mjs` | 看结构辅助命名：默认打印顶层声明，加 `--functions` 打印全部函数（含嵌套层级） |
@@ -186,7 +187,8 @@ node structure.mjs --functions     # 全部函数（含嵌套）
 编码方向由 [`.github/workflows/obfuscate.yml`](../.github/workflows/obfuscate.yml) 单独跑：
 
 ```
-merge 上游 core-only（先把上游 _worker.js/pages.zip 取成本地快照，避免与构建产物冲突）
+tools/merge-upstream.sh（上游 _worker.js/pages.zip 先单独提交为解码输入；
+  README.md / .gitignore 的冲突按本仓库自有内容自动解决，其余冲突中止交人工）
   → prettier 重新生成 _worker.pretty.js（新行号基准）
   → align.mjs 把旧命名平移到新行号（结构指纹 + LCS，内层函数增删不影响外层命名）
   → deobfuscate.mjs 生成新的 plain/_worker.js
@@ -208,8 +210,10 @@ merge 上游 core-only（先把上游 _worker.js/pages.zip 取成本地快照，
 
 ## 发布 Release
 
-`release.sh` 负责打开发布包并创建 GitHub Release，版本号取自 `plain/_worker.js` 的 `CORE_VERSION`；
-发布前会跑 `build-kernel.mjs --check`，确保 `_worker.js` / `pages.zip` 与明文 + 种子一致：
+`release.sh` 负责打开发布包并创建 GitHub Release，版本号取自 `plain/_worker.js` 的 `CORE_VERSION`，
+tag 再拼上 `plain/_worker.js` 的内容哈希（sha256 前 10 位，对已提交内容计算，不受本地换行符影响）：
+版本号不变、内核代码变了也能发新版本，只换混淆种子或只改文档则不会重复发版。发布前会跑
+`build-kernel.mjs --check`，确保 `_worker.js` / `pages.zip` 与明文 + 种子一致：
 
 ```bash
 bash tools/release.sh --check     # 输出 TAG=... EXISTS=0/1（CI 用它做幂等判断）
@@ -218,6 +222,7 @@ bash tools/release.sh             # 真正发布（需要 gh 已登录 / GH_TOKE
 ```
 
 资产：`_worker.js`（随机混淆内核）、`_worker.plain.js`（明文）、`pages.zip`、`SHA256SUMS.txt`；
-tag 就是版本号本身（如 `2026.10.17.2`），已存在则跳过。
+tag 是「版本号-明文内核内容哈希」（如 `2026.10.17.2-9f86d08188`），标题显示为 `内核 2026.10.17.2 (9f86d08188)`：
+CORE_VERSION 或内核代码变了才会发新 Release（旧版本保留），内核内容相同则跳过（幂等）。
 
 > 发布动作已并入 `sync-upstream.yml` 的 `sync` job（里面直接调用本脚本）。

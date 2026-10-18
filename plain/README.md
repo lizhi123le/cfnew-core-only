@@ -70,12 +70,16 @@ node --test src/test/*.test.mjs      # 混淆产物同样 55 / 55
 | `obfuscate.yml` | `verify` | push / PR（改动 `plain/**`、`_worker.js`、`pages.zip`、`tools/**`） | `self-test-obfuscate.mjs` + `build-kernel.mjs --check`：产物必须能由明文 + 种子逐字节重现 |
 | `obfuscate.yml` | `rebuild` | 手动 dispatch | 由明文重新生成并**替换** `_worker.js` 与 `pages.zip`；可勾选同时换随机种子、自动提交回 `core-only` |
 
-发布不需要单独的工作流：同步任务里直接调用 `tools/release.sh`（幂等，同名 tag 直接跳过）。所以
+发布不需要单独的工作流：同步任务里直接调用 `tools/release.sh`（tag = 版本号 + 明文内核内容哈希，
+内核内容相同就幂等跳过）。所以
 `sync → 重新混淆 → 校验 → 发布` 是同一条 job 里的顺序步骤，任何一步失败都不会推送、也不会发布。
 
 ## 发布
 
-内核 Release 的 tag 就是版本号本身（如 `2026.10.17.2`），和面板的 `PANEL_VERSION` / 内核的 `CORE_VERSION` 一致，方便直接对照：
+内核 Release 的 tag 由版本号 + 明文内核 `plain/_worker.js` 的内容哈希组成（如 `2026.10.17.2-9f86d08188`），
+前缀仍是 `CORE_VERSION`，方便和面板 `PANEL_VERSION` / 内核 `CORE_VERSION` 对照。
+这样 CORE_VERSION 没变、内核代码变了也会发新 Release：旧版本保留，不会被同名 tag 覆盖；
+只换混淆种子或只改文档不会重复发版，内核内容相同则跳过。
 
 | 资产 | 用途 |
 | --- | --- |
