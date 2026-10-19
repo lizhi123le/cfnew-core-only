@@ -129,8 +129,10 @@ node build-kernel.mjs --engine=builtin            # 切回默认
 比整串转义省体积；`build-kernel.mjs` 在写文件前调用 `findKeywordLeaks` 复查。
 
 范围：字符串字面量、模板静态片段、import/export 模块说明符、import 绑定名。
-发布产物会把 `cloudflare:sockets` 的说明符和 `connect` 绑定名都转义
-（`cloudflare:\x73...`、`\u0063onnect`）；面板测试用正则打桩，因此 `check.sh` 先用
+发布产物会把 `cloudflare:sockets` 的说明符和 `connect` 绑定名**按种子随机转义**：
+说明符里每个字符随机用 `\xHH` / `\uHHHH` / `\u{HH}`（十六进制大小写也随机），
+绑定名随机用 `\uXXXX` / `\u{XX}`；不同种子形态不同、同一 seed 可复现。
+构建日志会打印 `import 形态指纹`：每次新种子都会变；`--check` / `--reuse-seed` 复用种子时保持不变。面板测试用正则打桩，因此 `check.sh` 先用
 `tools/prepare-test-core.mjs` 生成「只还原这些语法书写形式」的等价副本，再跑测试；
 `build-kernel` 的运行时探针也会自动还原。`import` / `from` / `as` 是 JS 语法关键字，
 无法转义，构建日志会固定提示。

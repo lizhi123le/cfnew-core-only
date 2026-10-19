@@ -42,6 +42,7 @@ import {
   deriveSeed,
   loadSeedRecord,
   normalizeSeed,
+  mulberry32,
   obfuscate,
   parseCliArgs,
   randomSeed,
@@ -79,6 +80,12 @@ const SEED_FILE = process.env.CFNEW_SEED_FILE || SEED_PATH;
 const PROBE_UUID = '8f0c1d2e-3a4b-4c5d-8e9f-0a1b2c3d4e5f';
 const ENGINES = new Set(['builtin', 'javascript-obfuscator']);
 const IMPORT_PATTERN = /import\s*\{\s*connect as ([^}]+)\}\s*from\s*["']cloudflare:sockets["']\s*;?/;
+
+/** 只用于日志：显示 import 形态的指纹，肉眼可见每次构建是否变化。 */
+function importFingerprint(code) {
+  const match = code.match(/import[^;]*;/);
+  return crypto.createHash('sha256').update(match ? match[0] : code.slice(0, 200)).digest('hex').slice(0, 12);
+}
 
 const normalizeEol = (text) => text.replace(/\r\n/g, '\n');
 const sha256 = (data) => crypto.createHash('sha256').update(data).digest('hex');
@@ -218,6 +225,8 @@ export async function buildArtifacts({
     const keywordHide = hideKeywordsInCode(result.code, [...KEYWORDS.auto, ...KEYWORDS.manual], {
       includeModuleSpecifiers: true,
       includeImportIdentifiers: true,
+      randomize: true,
+      rng: mulberry32(seed),
     });
     const resultCode = keywordHide.code;
     const code = resultCode.endsWith('\n') ? resultCode : `${resultCode}\n`;
@@ -275,6 +284,7 @@ export async function buildArtifacts({
         seed,
         dependency: result.version,
         joStats: result.stats,
+        importFingerprint: importFingerprint(code),
         keywords: {
           hidden: keywordHide.hidden,
           words: keywordHide.words,
@@ -404,6 +414,7 @@ export async function buildArtifacts({
     dependency: null,
     seed: result.stats.seed,
     probe,
+    importFingerprint: importFingerprint(result.core),
     keywords: {
       hidden: result.stats.keywordsHidden || 0,
       words: result.stats.keywordHits || [],
@@ -463,6 +474,11 @@ function printStats(artifacts, seedSource) {
     console.log(`   运行时探针：coreVersion ${artifacts.probe.coreVersion}，配置字段 ${artifacts.probe.configKeys} 个，region=${artifacts.probe.region}`);
   }
   console.log(`   _worker.js：sha256 ${artifacts.hashes.worker.slice(0, 16)}…；pages.zip：${humanBytes(artifacts.zip.length)}，sha256 ${artifacts.hashes.zip.slice(0, 16)}…`);
+  if (artifacts.importFingerprint) {
+    console.log(
+      `   import 形态指纹：${artifacts.importFingerprint}（默认每次新种子都会变；--check/--reuse-seed 保持不变）`
+    );
+  }
   if (artifacts.keywords) {
     const k = artifacts.keywords;
     const structuralTotal = (k.structural || []).reduce((sum, [, count]) => sum + count, 0);

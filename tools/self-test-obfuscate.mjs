@@ -8,7 +8,7 @@
  *   4. 字符串值一致：所有字面量值逐个相同（面板 API 路径与配置字段名不会被改）
  *   5. 随机性：同种子可重现、换种子产物变化但语义不变
  *   6. 三种 mangle 模式：all / mapped / upstream 都可用
- *   7. 噪音与 import 契约：噪音只有惰性函数声明；`cloudflare:sockets` 保持原样（面板测试靠它打桩）
+ *   7. 噪音与 import 契约：噪音只有惰性函数声明；`cloudflare:sockets` 的转义形态可由测试副本还原后打桩
  *   8. pages.zip 写入 / 读取往返（含二进制与 UTF-8 条目名、字节级确定性）
  *   9. javascript-obfuscator 可选引擎：可重现、import 复原、运行时探针通过
  *  10. 体积预算与单行格式：默认 budget 模式落在 37±5 KB、产物体内无换行
@@ -18,7 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parse } from '@babel/parser';
 import _traverse from '@babel/traverse';
-import { buildReverseMap, obfuscate, assertInertNoise, deriveSeed, normalizeSeed, DEFAULT_PATHS } from './obfuscate.mjs';
+import { buildReverseMap, obfuscate, mulberry32, assertInertNoise, deriveSeed, normalizeSeed, DEFAULT_PATHS } from './obfuscate.mjs';
 import { obfuscateWithJavaScriptObfuscator } from './engine-javascript-obfuscator.mjs';
 import { probeRuntime } from './build-kernel.mjs';
 import { canonicalize } from './verify-alpha.mjs';
@@ -230,6 +230,26 @@ ok(
 ok(identProbe.code.startsWith('import'), 'import 关键字保留（JS 语法不可转义）');
 ok(identProbe.code.includes('from'), 'from 关键字保留（JS 语法不可转义）');
 ok(findKeywordLeaks(budget.code, ['connect'], { includeImportIdentifiers: true }).length === 0, '产物里 connect 已隐藏');
+const randomSrc = 'import{connect as X}from"cloudflare:sockets";';
+const randomWords = ['connect', 'cloudflare', 'sock'];
+const randomA = hideKeywordsInCode(randomSrc, randomWords, {
+  includeModuleSpecifiers: true,
+  includeImportIdentifiers: true,
+  randomize: true,
+  rng: mulberry32(0x11111111),
+});
+const randomB = hideKeywordsInCode(randomSrc, randomWords, {
+  includeModuleSpecifiers: true,
+  includeImportIdentifiers: true,
+  randomize: true,
+  rng: mulberry32(0x22222222),
+});
+ok(randomA.code !== randomB.code, '不同种子生成不同的随机转义形态');
+ok(
+  normalizeModuleSpecifiers(randomA.code).code ===
+    normalizeModuleSpecifiers(randomB.code).code,
+  '随机转义后还原值相同'
+);
 const visibility = scanKeywordVisibility(budget.code, keywordLists.auto);
 ok((visibility.exact.get('port') || 0) > 0, '结构扫描能如实报告 port/region 等整词属性名');
 ok((visibility.exact.get('region') || 0) > 0, '结构扫描能如实报告 region 等整词属性名');

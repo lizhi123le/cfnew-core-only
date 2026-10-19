@@ -119,7 +119,8 @@ node --test src/test/*.test.mjs      # 混淆产物同样 55 / 55
   想更小用 `--target-size=38000`，想显式控制用 `--escape=partial|none`（不再保证体积区间）。
 - 噪音是几段未引用的函数声明，加载时不执行，与正文拼在同一行；不需要时 `--noise=0`。
 - 关键词隐藏覆盖字符串/模板、模块说明符与 import 绑定名（`sensitive_words_auto/manual.txt`）；
-  `cloudflare:sockets` 和 `connect` 绑定在发布产物里会被转义，`check.sh`/运行时探针用等价副本还原后打桩。
+  `cloudflare:sockets` 和 `connect` 绑定在发布产物里会按种子**随机转义**（每次形态不同、同 seed 可复现），
+  `check.sh`/运行时探针用等价副本还原后打桩。
   `import`/`from`/`as` 是 JS 语法，无法转义；标识符/属性名（面板字段 `port`、`region`、运行时 `.connect`）
   也不能改名，构建日志会把它们作为「结构内整词可见」如实报告，而不是算作 0 泄露。
 - 上游发布新版本后，重跑 `tools/deobfuscate.mjs` 即可（映射表在 `tools/names.json`，按格式化行号对齐）。

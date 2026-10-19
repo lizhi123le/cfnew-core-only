@@ -789,6 +789,8 @@ export function obfuscate({
   const keywordResult = hideKeywordsInCode(core, [...KEYWORDS.auto, ...KEYWORDS.manual], {
     includeModuleSpecifiers: true,
     includeImportIdentifiers: true,
+    randomize: true,
+    rng,
   });
   if (keywordResult.hidden > 0) core = keywordResult.code;
 

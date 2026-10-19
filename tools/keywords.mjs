@@ -78,9 +78,36 @@ function escapeCodeUnit(code) {
   return `\\u${hex4(code)}`;
 }
 
+function randomHex(code, width, rng) {
+  const digits = code.toString(16).padStart(width, '0');
+  let out = '';
+  for (const ch of digits) out += rng() < 0.5 ? ch.toUpperCase() : ch;
+  return out;
+}
+
+/** 随机转义一个字符：字符串可用 \x / \u，标识符只能用 \u；十六进制大小写也随机。 */
+function randomEscapeUnit(code, rng, { identifier = false } = {}) {
+  const style = rng();
+  if (!identifier && code <= 0xff && style < 0.35) {
+    return `\\x${randomHex(code, 2, rng)}`;
+  }
+  if (style < 0.72) {
+    return `\\u${randomHex(code, 4, rng)}`;
+  }
+  // ES2015 的码点转义：\u{63} 与 \u0063 等价，但形态不同，增加每次构建的差异
+  return `\\u{${randomHex(code, 2, rng)}}`;
+}
+
 /** 标识符里的关键词：用 Unicode 转义（`connect` → `\u0063onnect`），仍是同一个标识符。 */
-function hideIdentifierName(name, words) {
+function hideIdentifierName(name, words, { randomize = false, rng = () => 0.5 } = {}) {
   const { covered, hits } = markMatches(name, words);
+  if (randomize) {
+    let randomized = '';
+    for (let i = 0; i < name.length; i++) {
+      randomized += randomEscapeUnit(name.charCodeAt(i), rng, { identifier: true });
+    }
+    return { text: randomized, hits };
+  }
   if (hits.length === 0) return null;
   let out = '';
   for (let i = 0; i < name.length; i++) {
@@ -106,8 +133,14 @@ function markMatches(text, words) {
 }
 
 /** 把一个字符串字面量按命中位置改写（其余字符保持可读，尽量不增大体积）。 */
-function hideStringLiteral(value, words) {
+function hideStringLiteral(value, words, { randomize = false, rng = () => 0.5 } = {}) {
   const { covered, hits } = markMatches(value, words);
+  if (randomize) {
+    // 说明符整体随机转义：每个字符都换一种写法，值不变。
+    let randomized = '"';
+    for (let i = 0; i < value.length; i++) randomized += randomEscapeUnit(value.charCodeAt(i), rng);
+    return { text: `${randomized}"`, hits };
+  }
   if (hits.length === 0) return null;
   let out = '"';
   for (let i = 0; i < value.length; i++) {
@@ -145,7 +178,12 @@ function hideTemplateRaw(raw, words) {
 export function hideKeywordsInCode(
   code,
   words,
-  { includeModuleSpecifiers = false, includeImportIdentifiers = false } = {}
+  {
+    includeModuleSpecifiers = false,
+    includeImportIdentifiers = false,
+    randomize = false,
+    rng = () => 0.5,
+  } = {}
 ) {
   if (!words || words.length === 0) return { code, hidden: 0, words: [] };
   const ast = parseModule(code);
@@ -159,7 +197,10 @@ export function hideKeywordsInCode(
       const moduleSpecifier = isModuleSpecifier(p);
       if (moduleSpecifier && !includeModuleSpecifiers) return;
       const node = p.node;
-      const hidden = hideStringLiteral(node.value, words);
+      const hidden = hideStringLiteral(node.value, words, {
+        randomize: randomize && moduleSpecifier,
+        rng,
+      });
       if (!hidden) return;
       hidden.hits.forEach((word) => {
         hitWords.add(word);
@@ -183,7 +224,10 @@ export function hideKeywordsInCode(
       const node = p.node;
       for (const identifier of [node.imported, node.local]) {
         if (!identifier || identifier.type !== 'Identifier') continue;
-        const hidden = hideIdentifierName(identifier.name, words);
+        const hidden = hideIdentifierName(identifier.name, words, {
+          randomize: randomize && identifier === node.imported,
+          rng,
+        });
         if (!hidden) continue;
         hidden.hits.forEach((word) => {
           hitWords.add(word);
@@ -195,7 +239,7 @@ export function hideKeywordsInCode(
     ImportDefaultSpecifier(p) {
       if (!includeImportIdentifiers) return;
       const identifier = p.node.local;
-      const hidden = hideIdentifierName(identifier.name, words);
+      const hidden = hideIdentifierName(identifier.name, words, { randomize: false, rng });
       if (!hidden) return;
       hidden.hits.forEach((word) => {
         hitWords.add(word);
@@ -206,7 +250,7 @@ export function hideKeywordsInCode(
     ImportNamespaceSpecifier(p) {
       if (!includeImportIdentifiers) return;
       const identifier = p.node.local;
-      const hidden = hideIdentifierName(identifier.name, words);
+      const hidden = hideIdentifierName(identifier.name, words, { randomize: false, rng });
       if (!hidden) return;
       hidden.hits.forEach((word) => {
         hitWords.add(word);
@@ -372,7 +416,12 @@ export function scanKeywordVisibility(code, words) {
 export function findKeywordLeaks(
   code,
   words,
-  { includeModuleSpecifiers = false, includeImportIdentifiers = false } = {}
+  {
+    includeModuleSpecifiers = false,
+    includeImportIdentifiers = false,
+    randomize = false,
+    rng = () => 0.5,
+  } = {}
 ) {
   if (!words || words.length === 0) return [];
   const ast = parseModule(code);
