@@ -106,7 +106,7 @@ node --test src/test/*.test.mjs      # 混淆产物同样 55 / 55
 - KV：配置存键 `c`（JSON），保存时间戳写 `c_ver`；缓存 30 秒，`POST` 后主动失效。
 - 配置字段（保存白名单，共 32 个）：`freeCpu wk ev et ex ech tp customDNS customECHDomain alpn d p yx yxURL s homepage scu ena epd epi egi ae rm qj dkby yxby ipv4 ipv6 ispMobile ispUnicom ispTelecom jk`。
 - 版本：`CORE_VERSION` 必须与面板发布版本一致（当前 `2026.10.17.2`），否则面板提示"内核需要更新"。
-- 混淆只改名字与字符串写法：**属性名/JSON 字段名/字符串值/KV 键都不变**；`cloudflare:sockets` 的 import 原文保留（面板测试靠正则打桩）。
+- 混淆只改名字与字符串写法：**属性名/JSON 字段名/字符串值/KV 键都不变**；`cloudflare:sockets` 的模块说明符会按关键词转义，测试副本还原后供面板正则打桩。
 
 ## 已知取舍
 
@@ -118,9 +118,10 @@ node --test src/test/*.test.mjs      # 混淆产物同样 55 / 55
   剩余预算分给随机字符串和噪音；产物固定单行并落在 32–42 KB（当前 39,432 字节）。
   想更小用 `--target-size=38000`，想显式控制用 `--escape=partial|none`（不再保证体积区间）。
 - 噪音是几段未引用的函数声明，加载时不执行，与正文拼在同一行；不需要时 `--noise=0`。
-- 关键词隐藏只覆盖字符串/模板静态片段（`sensitive_words_auto/manual.txt`）；模块说明符、
-  标识符与属性名不改写（面板契约），所以 `type`、`config` 这类词仍可能出现在标识符里；
-  `cloudflare:sockets` 是结构性例外（含 `sock`），构建日志会单独列出，面板测试依赖它保持原文。
+- 关键词隐藏覆盖字符串/模板、模块说明符与 import 绑定名（`sensitive_words_auto/manual.txt`）；
+  `cloudflare:sockets` 和 `connect` 绑定在发布产物里会被转义，`check.sh`/运行时探针用等价副本还原后打桩。
+  `import`/`from`/`as` 是 JS 语法，无法转义；标识符/属性名（面板字段 `port`、`region`、运行时 `.connect`）
+  也不能改名，构建日志会把它们作为「结构内整词可见」如实报告，而不是算作 0 泄露。
 - 上游发布新版本后，重跑 `tools/deobfuscate.mjs` 即可（映射表在 `tools/names.json`，按格式化行号对齐）。
 - 想要「用混淆库参数化」的产物，可以 `--engine=javascript-obfuscator --jo-preset=auto|light|balanced` 切换引擎
   （参数写进 `tools/obfuscator.config.json`）；`auto` 会自动搜索 `stringArrayThreshold` 把体积控制在 37±5 KB，

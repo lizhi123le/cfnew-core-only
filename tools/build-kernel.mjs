@@ -52,7 +52,14 @@ import {
 } from './obfuscate.mjs';
 import { JO_PRESETS, joDependencyVersion, obfuscateWithJavaScriptObfuscator } from './engine-javascript-obfuscator.mjs';
 import { canonicalize } from './verify-alpha.mjs';
-import { findKeywordLeaks, findKeywordLeaksInModuleSpecifiers, hideKeywordsInCode, loadKeywordLists } from './keywords.mjs';
+import {
+  findKeywordLeaks,
+  findKeywordLeaksInModuleSpecifiers,
+  hideKeywordsInCode,
+  loadKeywordLists,
+  normalizeModuleSpecifiers,
+  scanKeywordVisibility,
+} from './keywords.mjs';
 
 const TOOLS = import.meta.dirname;
 const ROOT = path.resolve(TOOLS, '..');
@@ -67,6 +74,7 @@ const PATHS = {
 
 const WORKER_ENTRY = '_worker.js';
 const KEYWORDS = loadKeywordLists();
+const JS_SYNTAX_WORDS = new Set(['import', 'from', 'as', 'export', 'default']);
 const SEED_FILE = process.env.CFNEW_SEED_FILE || SEED_PATH;
 const PROBE_UUID = '8f0c1d2e-3a4b-4c5d-8e9f-0a1b2c3d4e5f';
 const ENGINES = new Set(['builtin', 'javascript-obfuscator']);
@@ -133,10 +141,12 @@ function hasDefaultExport(ast) {
  * 对 builtin 与 javascript-obfuscator 两种引擎都适用。
  */
 export async function probeRuntime({ code, version }) {
-  const match = code.match(IMPORT_PATTERN);
+  // 产物可能转义了模块说明符；打桩前先统一还原成原文。
+  const normalizedCode = normalizeModuleSpecifiers(code).code;
+  const match = normalizedCode.match(IMPORT_PATTERN);
   if (!match) throw new Error('找不到 cloudflare:sockets 的 import（cfnew-panel 测试靠它打桩）');
   const localName = match[1].trim();
-  const stubbed = code.replace(
+  const stubbed = normalizedCode.replace(
     match[0],
     `const ${localName} = () => { throw new Error('probe: cloudflare:sockets 不可用'); };`,
   );
@@ -205,7 +215,10 @@ export async function buildArtifacts({
     });
 
     // 关键词隐藏（JO 引擎在所选预设之外再兜一层）：只转义命中的字符，值不变。
-    const keywordHide = hideKeywordsInCode(result.code, [...KEYWORDS.auto, ...KEYWORDS.manual]);
+    const keywordHide = hideKeywordsInCode(result.code, [...KEYWORDS.auto, ...KEYWORDS.manual], {
+      includeModuleSpecifiers: true,
+      includeImportIdentifiers: true,
+    });
     const resultCode = keywordHide.code;
     const code = resultCode.endsWith('\n') ? resultCode : `${resultCode}\n`;
     const totalBytes = Buffer.byteLength(result.code);
@@ -221,18 +234,28 @@ export async function buildArtifacts({
 
     const ast = parse(code, { sourceType: 'module' });
     if (!hasDefaultExport(ast)) throw new Error('产物没有 default 导出，Workers/Pages 无法加载');
-    const hardLeaks = findKeywordLeaks(code, KEYWORDS.auto);
+    const hardLeaks = findKeywordLeaks(code, KEYWORDS.auto, { includeModuleSpecifiers: true, includeImportIdentifiers: true });
     if (hardLeaks.length) {
       throw new Error(
         `产物里仍有硬性禁止词以明文出现：${hardLeaks.map((l) => l.word).join(', ')}。` +
           '这些位置无法用字符串转义隐藏（例如模块说明符/正则/标识符），请调整词表或换 builtin 引擎。'
       );
     }
-    const expectedLeaks = findKeywordLeaks(code, KEYWORDS.manual);
+    const expectedLeaks = findKeywordLeaks(code, KEYWORDS.manual, { includeModuleSpecifiers: true, includeImportIdentifiers: true });
     if (expectedLeaks.length) {
       console.warn(`⚠️ 期望隐藏词仍可见：${expectedLeaks.map((l) => l.word).join(', ')}`);
     }
     const moduleHits = findKeywordLeaksInModuleSpecifiers(code, KEYWORDS.auto);
+    const visibility = scanKeywordVisibility(code, KEYWORDS.auto);
+    const structural = [...visibility.structural]
+      .filter(([, count]) => count > 0)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8);
+    const exactVisible = [...visibility.exact]
+      .filter(([, count]) => count > 0)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 12);
+    const exactTotal = [...visibility.exact].reduce((sum, [, count]) => sum + count, 0);
     const probe = await probeRuntime({ code, version });
 
     const zip = createZip([{ name: WORKER_ENTRY, data: Buffer.from(code, 'utf8') }]);
@@ -252,7 +275,17 @@ export async function buildArtifacts({
         seed,
         dependency: result.version,
         joStats: result.stats,
-        keywords: { hidden: keywordHide.hidden, hardLeaks, expectedLeaks, moduleHits },
+        keywords: {
+          hidden: keywordHide.hidden,
+          words: keywordHide.words,
+          hardLeaks,
+          expectedLeaks,
+          moduleHits,
+          structural,
+          exactVisible,
+          exactTotal,
+          syntaxWords: KEYWORDS.auto.filter((word) => JS_SYNTAX_WORDS.has(word)),
+        },
         targetBytes,
         coreBytes: totalBytes,
         noiseBytes: 0,
@@ -333,18 +366,28 @@ export async function buildArtifacts({
   assertInertNoise(result.noise);
 
   // 门槛 6：关键词（auto 硬性禁止，manual 期望隐藏）
-  const hardLeaks = findKeywordLeaks(result.core, KEYWORDS.auto);
+  const hardLeaks = findKeywordLeaks(result.core, KEYWORDS.auto, { includeModuleSpecifiers: true, includeImportIdentifiers: true });
   if (hardLeaks.length) {
     throw new Error(
       `产物里仍有硬性禁止词以明文出现：${hardLeaks.map((l) => l.word).join(', ')}。` +
-        '请检查 tools/keywords.mjs 的覆盖范围（模块说明符/正则/标识符不参与隐藏）或调整 sensitive_words_auto.txt。'
+        '请检查 tools/keywords.mjs 的覆盖范围（正则/标识符不参与隐藏）或调整 sensitive_words_auto.txt。'
     );
   }
-  const expectedLeaks = findKeywordLeaks(result.core, KEYWORDS.manual);
+  const expectedLeaks = findKeywordLeaks(result.core, KEYWORDS.manual, { includeModuleSpecifiers: true, includeImportIdentifiers: true });
   if (expectedLeaks.length) {
     console.warn(`⚠️ 期望隐藏词仍可见：${expectedLeaks.map((l) => l.word).join(', ')}`);
   }
   const moduleHits = findKeywordLeaksInModuleSpecifiers(result.core, KEYWORDS.auto);
+  const visibility = scanKeywordVisibility(result.core, KEYWORDS.auto);
+  const structural = [...visibility.structural]
+    .filter(([, count]) => count > 0)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8);
+  const exactVisible = [...visibility.exact]
+    .filter(([, count]) => count > 0)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 12);
+  const exactTotal = [...visibility.exact].reduce((sum, [, count]) => sum + count, 0);
 
   // 运行时契约探针（两种引擎共用；面板 55 项测试在 check.sh 里跑）
   const probe = await probeRuntime({ code, version: result.version });
@@ -361,7 +404,17 @@ export async function buildArtifacts({
     dependency: null,
     seed: result.stats.seed,
     probe,
-    keywords: { hidden: result.stats.keywordsHidden || 0, hardLeaks, expectedLeaks, moduleHits },
+    keywords: {
+      hidden: result.stats.keywordsHidden || 0,
+      words: result.stats.keywordHits || [],
+      hardLeaks,
+      expectedLeaks,
+      moduleHits,
+      structural,
+      exactVisible,
+      exactTotal,
+      syntaxWords: KEYWORDS.auto.filter((word) => JS_SYNTAX_WORDS.has(word)),
+    },
     stats: result.stats,
     hashes: { worker: sha256(code), zip: sha256(zip) },
   };
@@ -412,13 +465,26 @@ function printStats(artifacts, seedSource) {
   console.log(`   _worker.js：sha256 ${artifacts.hashes.worker.slice(0, 16)}…；pages.zip：${humanBytes(artifacts.zip.length)}，sha256 ${artifacts.hashes.zip.slice(0, 16)}…`);
   if (artifacts.keywords) {
     const k = artifacts.keywords;
+    const structuralTotal = (k.structural || []).reduce((sum, [, count]) => sum + count, 0);
     console.log(
-      `   关键词：隐藏 ${k.hidden} 处；硬性泄露 ${k.hardLeaks.length}；期望泄露 ${k.expectedLeaks.length}`
+      `   关键词：隐藏 ${k.hidden} 段（${(k.words || []).length} 个词）；可隐藏位置泄露 ${k.hardLeaks.length}；期望泄露 ${k.expectedLeaks.length}`
     );
+    if (k.exactVisible && k.exactVisible.length) {
+      const detail = k.exactVisible.map(([word, count]) => `${word}×${count}`).join('、');
+      console.log(`   结构内整词可见：约 ${k.exactTotal} 处（${detail} …；标识符/属性名，无法转义，未计入泄露）`);
+    }
+    if (k.structural && k.structural.length) {
+      const detail = k.structural.map(([word, count]) => `${word}×${count}`).join('、');
+      console.log(
+        `   子串命中：约 ${structuralTotal} 处（${detail} …；可能是更长单词的一部分，如 import 含 port，未计入泄露）`
+      );
+    }
+    console.log('   语法关键字固定保留：import / from / as（JS 语法，不是可隐藏字符串）');
     if (k.moduleHits && k.moduleHits.length) {
       const detail = [...new Set(k.moduleHits.map((h) => `${h.snippet}（含 ${h.word}）`))].join('、');
       console.log(`   结构性例外：${detail} —— 模块说明符必须保持原文（cfnew-panel 测试靠它打桩）`);
     }
+
   }
   for (const msg of s.missingBindings) console.log(`   ! ${msg}`);
   if (s.unmappedSemantics.length) {

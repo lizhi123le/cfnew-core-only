@@ -33,7 +33,10 @@ client
 query
 irect
 osite
+from
+uuid
 omain
+mport
 proxy
 reality
 cidr
@@ -47,6 +50,7 @@ reject
 SniList
 eoip
 subPath
+onnect
 alpn
 clean
 block
@@ -54,6 +58,7 @@ region
 pool
 match
 type
+cloudflare
 protocol
 config
 peedtest
@@ -71,4 +76,5 @@ cfnew
 edgetunnel
 cmliu
 joey
+connect
 sock

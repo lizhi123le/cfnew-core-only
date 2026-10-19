@@ -88,8 +88,9 @@ _worker.pretty.js ──deobfuscate──▶ plain/_worker.js ──obfuscate─
 - `controlFlowFlattening` 关闭：每请求都会多一层状态机，和 Cloudflare 免费 CPU 预算冲突；
 - `selfDefending` / `debugProtection` 关闭：依赖 Function 构造与调试器检测，Workers 运行时不可靠。
 
-另外官方混淆器会把 `import ... from "cloudflare:sockets"` 的说明符一起转义/搬进数组，
-适配层 `engine-javascript-obfuscator.mjs` 会在输出后把它复原成明文，cfnew-panel 的测试才能打桩。
+另外官方混淆器会把 `import ... from "cloudflare:sockets"` 的说明符一起转义/搬进数组；
+适配层 `engine-javascript-obfuscator.mjs` 会先复原成明文，之后关键词隐藏再按词表转义，
+测试副本（`prepare-test-core.mjs`）负责在打桩前还原。
 
 切换引擎（写模式会把 engine/preset 记进 seed 文件）：
 
@@ -120,17 +121,29 @@ node build-kernel.mjs --engine=builtin            # 切回默认
 
 词表放在仓库根目录（每行一个，空行与 `#` 注释忽略）：
 
-- `sensitive_words_auto.txt`：**指定隐藏**。字符串/模板里命中即强制转义；构建结束时再检查一次，
+- `sensitive_words_auto.txt`：**指定隐藏**。字符串/模板/模块说明符里命中即强制转义；构建结束时再检查一次，
   只要还有明文残留就直接失败。
 - `sensitive_words_manual.txt`：**期望隐藏**。同样优先转义；仍有残留只打印 WARN，不阻塞构建。
 
 实现见 `tools/keywords.mjs`：只转义命中的字符（`type` → `\x74ype`），字符串值不变，
 比整串转义省体积；`build-kernel.mjs` 在写文件前调用 `findKeywordLeaks` 复查。
 
-范围限制：import/export 的模块说明符必须保持原文（面板测试靠 `cloudflare:sockets` 打桩），
-标识符与属性名也不改写（属性名是面板 JSON 契约），因此这些位置不参与隐藏与检查。
-`build-kernel` 会把模块说明符里的命中作为**结构性例外**显式打印（例如 `cloudflare:sockets` 含 `sock`），
-而不是悄悄跳过；要让它彻底消失只能改写模块说明符，但那会让 cfnew-panel 的打桩正则失效。
+范围：字符串字面量、模板静态片段、import/export 模块说明符、import 绑定名。
+发布产物会把 `cloudflare:sockets` 的说明符和 `connect` 绑定名都转义
+（`cloudflare:\x73...`、`\u0063onnect`）；面板测试用正则打桩，因此 `check.sh` 先用
+`tools/prepare-test-core.mjs` 生成「只还原这些语法书写形式」的等价副本，再跑测试；
+`build-kernel` 的运行时探针也会自动还原。`import` / `from` / `as` 是 JS 语法关键字，
+无法转义，构建日志会固定提示。
+
+构建日志怎么读：
+
+- `隐藏 N 段（M 个词）`：已转义的字符串/模板/模块说明符/import 绑定名；
+- `可隐藏位置泄露 0`：上述可隐藏位置的检查结果（应为 0，非 0 直接失败）；
+- `结构内整词可见：...`：标识符/属性名（如面板字段 `port`/`region`、运行时 API `.connect`），
+  是代码结构或面板契约，不能改名，**未计入泄露**；
+- `子串命中：...`：更长单词的一部分（如 `import` 含 `port`），**未计入泄露**；
+- `语法关键字固定保留：import / from / as`。
+
 词表路径可用 `CFNEW_KEYWORDS_AUTO` / `CFNEW_KEYWORDS_MANUAL` 覆盖。
 
 ## 面板接口为什么不会被破坏
@@ -140,8 +153,8 @@ node build-kernel.mjs --engine=builtin            # 切回默认
 - 属性名 / JSON 字段名（`freeCpu`、`yx`、`d`、`jk` 等）是对象键，`scope.rename` 不碰；
 - 路由与常量（`hello`、`/api/config`、`/api/preferred-ips`、`/region`、`/test-api`、KV 键 `c`、`c_ver`）
   都是字符串字面量，转义后解码值完全相同；
-- `import { connect as X } from "cloudflare:sockets"` 的模块说明符**不转义**——cfnew-panel 的测试
-  正是用正则把它替换成桩函数；
+- `import { connect as X } from "cloudflare:sockets"` 的模块说明符在发布产物里按词表转义，
+  测试副本会还原成原文，cfnew-panel 的测试才能用正则把它替换成桩函数；
 - 噪音只有顶层函数声明，从不被调用；随机名避开了源码里出现的所有标识符与保留字，不可能遮蔽全局。
 
 `build-kernel.mjs` 会强制比对「明文与混淆核的全部字符串字面量值」，`check.sh` 再把面板 55 项测试
@@ -153,6 +166,7 @@ node build-kernel.mjs --engine=builtin            # 切回默认
 | --- | --- |
 | `deobfuscate.mjs` | **解码**：读 `_worker.pretty.js` + `names.json` + `comments.json`，做作用域安全重命名并插注释，生成 `plain/_worker.js` |
 | `obfuscate.mjs` | **内置混淆引擎**：明文 → 随机短名 + 字符串转义 + 惰性噪音。改名前记录每个引用的绑定，改名后逐个复核，任何「引用被捕获 / 被遮蔽」都会拒绝输出；`--core` 可只输出混淆核供 alpha 校验 |
+| `prepare-test-core.mjs` | 给面板测试生成等价副本：只把 import/export 模块说明符还原成原文（字符串值不变），供打桩正则使用 |
 | `keywords.mjs` | **关键词**：读取根目录 `sensitive_words_auto.txt`（硬性禁止）与 `sensitive_words_manual.txt`（期望隐藏），把字符串/模板里命中的字符转义成 `\xHH` / `\uHHHH`；`findKeywordLeaks` 供构建闸门复查 |
 | `engine-javascript-obfuscator.mjs` | **可选混淆引擎**：封装 `javascript-obfuscator`（预设 light/balanced、`tools/obfuscator.config.json` 参数覆盖、危险参数拦截、import 说明符复原） |
 | `build-kernel.mjs` | **混淆工作流**：`plain/_worker.js` → `_worker.js` + `pages.zip`。builtin 引擎过 alpha/字符串值/版本/导出/噪音/单行体积六道门槛；两种引擎都过「运行时契约探针」；`--check` 只校验、`--dry-run` 只看差异；默认每次换种子，`--reuse-seed` 复用记录里的种子 |

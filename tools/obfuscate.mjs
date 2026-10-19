@@ -786,7 +786,10 @@ export function obfuscate({
   }).code;
 
   // 关键词隐藏先做：只转义命中的字符，字符串值不变；随后体积预算在剩余空间里分配。
-  const keywordResult = hideKeywordsInCode(core, [...KEYWORDS.auto, ...KEYWORDS.manual]);
+  const keywordResult = hideKeywordsInCode(core, [...KEYWORDS.auto, ...KEYWORDS.manual], {
+    includeModuleSpecifiers: true,
+    includeImportIdentifiers: true,
+  });
   if (keywordResult.hidden > 0) core = keywordResult.code;
 
   const escapedInfo = escapeStringLiterals(core, rng, escape, { targetBytes, noiseCap: noiseBytes });

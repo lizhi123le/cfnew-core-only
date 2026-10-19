@@ -41,9 +41,14 @@ fi
 )
 
 echo "== 5/5 面板接口契约（混淆产物 _worker.js）=="
+# 发布产物把 cloudflare:sockets 里的 sock 转义了；面板测试用正则打桩，需要原文说明符。
+# 这里生成一份只还原模块说明符的等价副本给测试，发布产物本身不变。
+TEST_CORE="$(mktemp)"
+node tools/prepare-test-core.mjs "$ROOT/_worker.js" "$TEST_CORE"
 (
   cd "$PANEL"
-  CFNEW_TEST_CORE="$ROOT/_worker.js" node --test src/test/*.test.mjs
+  CFNEW_TEST_CORE="$TEST_CORE" node --test src/test/*.test.mjs
 )
+rm -f "$TEST_CORE"
 
 echo "== 全部通过 =="

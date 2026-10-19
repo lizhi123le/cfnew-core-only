@@ -23,7 +23,14 @@ import { obfuscateWithJavaScriptObfuscator } from './engine-javascript-obfuscato
 import { probeRuntime } from './build-kernel.mjs';
 import { canonicalize } from './verify-alpha.mjs';
 import { createZip, readZipEntries } from './pages-zip.mjs';
-import { findKeywordLeaks, findKeywordLeaksInModuleSpecifiers, hideKeywordsInCode, loadKeywordLists } from './keywords.mjs';
+import {
+  findKeywordLeaks,
+  findKeywordLeaksInModuleSpecifiers,
+  scanKeywordVisibility,
+  hideKeywordsInCode,
+  loadKeywordLists,
+  normalizeModuleSpecifiers,
+} from './keywords.mjs';
 
 const traverse = _traverse.default || _traverse;
 const TOOLS = import.meta.dirname;
@@ -127,9 +134,13 @@ ok(base.code.startsWith(base.core), '产物 = 混淆核 + 噪音（前缀一致�
 ok(base.stats.noiseBytes > 0, `噪音 ${base.stats.noiseBytes} 字节`);
 const noiseAst = parse(base.noise, { sourceType: 'module' });
 ok(noiseAst.program.body.every((stmt) => stmt.type === 'FunctionDeclaration'), '噪音顶层只有函数声明（不会执行）');
-const importMatch = base.code.match(IMPORT_PATTERN);
-ok(Boolean(importMatch), 'cloudflare:sockets 的 import 保持原文形态（面板测试打桩依赖）', base.code.slice(0, 80));
-ok(IMPORT_PATTERN.test(upstream.core) || IMPORT_PATTERN.test(mapped.core), '其他模式同样保留 import 原文');
+ok(!base.code.includes('cloudflare:sockets'), '产物里的模块说明符已被转义');
+ok(Boolean(normalizeModuleSpecifiers(base.code).code.match(IMPORT_PATTERN)), '测试副本还原后能匹配面板打桩 import');
+ok(
+  Boolean(normalizeModuleSpecifiers(upstream.core).code.match(IMPORT_PATTERN)) &&
+    Boolean(normalizeModuleSpecifiers(mapped.core).code.match(IMPORT_PATTERN)),
+  '其他模式同样可在测试副本里还原模块说明符'
+);
 
 console.log('== 8. pages.zip 写入 / 读取往返 ==');
 const textEntry = { name: '_worker.js', data: base.code };
@@ -189,7 +200,7 @@ const keywordLists = loadKeywordLists();
 ok(keywordLists.auto.length > 0, `硬性禁止词表 ${keywordLists.auto.length} 条`);
 ok(keywordLists.manual.length > 0, `期望隐藏词表 ${keywordLists.manual.length} 条`);
 const keywordProbe = hideKeywordsInCode('const a = "cfnew vless config";', ['cfnew', 'vless', 'config']);
-ok(keywordProbe.hidden > 0, `合成样本隐藏了 ${keywordProbe.hidden} 处`);
+ok(keywordProbe.hidden > 0, `合成样本隐藏了 ${keywordProbe.hidden} 段`);
 ok(findKeywordLeaks(keywordProbe.code, ['cfnew', 'vless', 'config']).length === 0, '隐藏后检查不到明文');
 const parsedProbe = parse(keywordProbe.code, { sourceType: 'module' });
 let probeValue = null;
@@ -200,7 +211,28 @@ ok(findKeywordLeaks(base.core, keywordLists.auto).length === 0, 'escape=all 产�
 ok(findKeywordLeaks(budget.core, keywordLists.auto).length === 0, 'budget 产物无硬性泄露');
 ok(findKeywordLeaks(budget.code, keywordLists.auto).length === 0, '带噪音的最终产物无硬性泄露');
 const moduleHits = findKeywordLeaksInModuleSpecifiers(budget.code, keywordLists.auto);
-ok(moduleHits.some((hit) => hit.word === 'sock'), '模块说明符按设计豁免（cloudflare:sockets 含 sock）');
+ok(moduleHits.length === 0, '模块说明符里的关键词也已隐藏');
+ok(!budget.code.includes('cloudflare:sockets'), '发布产物不含明文 cloudflare:sockets');
+const normalizedForTest = normalizeModuleSpecifiers(budget.code);
+ok(normalizedForTest.code !== budget.code, '测试副本对模块说明符做了还原');
+ok(/from"cloudflare:sockets"/.test(normalizedForTest.code), '还原后能匹配面板测试的打桩正则');
+const identProbe = hideKeywordsInCode('import{connect as X}from"cloudflare:sockets";', ['connect'], {
+  includeImportIdentifiers: true,
+});
+ok(!identProbe.code.includes('connect'), 'import 绑定名 connect 已用 Unicode 转义隐藏');
+const identAst = parse(identProbe.code, { sourceType: 'module' });
+const identSpec = identAst.program.body[0].specifiers[0];
+ok(identSpec.imported.name === 'connect', 'Unicode 转义后绑定名仍是 connect');
+ok(
+  /import\{connect as X\}from"cloudflare:sockets"/.test(normalizeModuleSpecifiers(identProbe.code).code),
+  '测试副本能还原 import 绑定名'
+);
+ok(identProbe.code.startsWith('import'), 'import 关键字保留（JS 语法不可转义）');
+ok(identProbe.code.includes('from'), 'from 关键字保留（JS 语法不可转义）');
+ok(findKeywordLeaks(budget.code, ['connect'], { includeImportIdentifiers: true }).length === 0, '产物里 connect 已隐藏');
+const visibility = scanKeywordVisibility(budget.code, keywordLists.auto);
+ok((visibility.exact.get('port') || 0) > 0, '结构扫描能如实报告 port/region 等整词属性名');
+ok((visibility.exact.get('region') || 0) > 0, '结构扫描能如实报告 region 等整词属性名');
 
 console.log('');
 if (failures) {
