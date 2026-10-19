@@ -147,6 +147,8 @@ bash check.sh                      # 五道硬门槛：align + 混淆自测 + �
 ```
 
 写文件前会强制校验：AST alpha 等价、所有字符串值逐个相同、版本常量一致、默认导出存在、噪音惰性；
+另外按根目录 `sensitive_words_auto.txt`（硬性禁止词）/ `sensitive_words_manual.txt`（期望隐藏词）
+做关键词隐藏与检查：硬性词以明文残留会直接构建失败，期望词残留只告警；
 另外两种引擎都会跑内置的「运行时契约探针」（`/`=hello、`/api/config` 的 coreVersion 与字段、`/region`、404）。
 面板 55 项测试会同时跑在 `plain/_worker.js` 和 `_worker.js` 上，接口路径、配置字段与六种订阅都按真实请求验证。
 可选引擎 `javascript-obfuscator`（`auto` / `light` / `balanced` 预设，`auto` 会用体积预算搜索参数并落在 37±5 KB；参数可写进 `tools/obfuscator.config.json`）无法做

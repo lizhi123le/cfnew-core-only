@@ -118,6 +118,9 @@ node --test src/test/*.test.mjs      # 混淆产物同样 55 / 55
   剩余预算分给随机字符串和噪音；产物固定单行并落在 32–42 KB（当前 39,432 字节）。
   想更小用 `--target-size=38000`，想显式控制用 `--escape=partial|none`（不再保证体积区间）。
 - 噪音是几段未引用的函数声明，加载时不执行，与正文拼在同一行；不需要时 `--noise=0`。
+- 关键词隐藏只覆盖字符串/模板静态片段（`sensitive_words_auto/manual.txt`）；模块说明符、
+  标识符与属性名不改写（面板契约），所以 `type`、`config` 这类词仍可能出现在标识符里；
+  `cloudflare:sockets` 是结构性例外（含 `sock`），构建日志会单独列出，面板测试依赖它保持原文。
 - 上游发布新版本后，重跑 `tools/deobfuscate.mjs` 即可（映射表在 `tools/names.json`，按格式化行号对齐）。
 - 想要「用混淆库参数化」的产物，可以 `--engine=javascript-obfuscator --jo-preset=auto|light|balanced` 切换引擎
   （参数写进 `tools/obfuscator.config.json`）；`auto` 会自动搜索 `stringArrayThreshold` 把体积控制在 37±5 KB，
@@ -134,6 +137,9 @@ pages.zip                         # Cloudflare Pages 直传包（由混淆产物
 tools/names.json                  # 行号 → 语义名（align.mjs 自动平移，可手工补）
 tools/comments.json               # 行号 → 注释
 tools/obfuscate.seed.json         # 最近一次构建用的种子/引擎/参数（默认每次构建更新）
+sensitive_words_auto.txt          # 硬性禁止词：字符串明文命中即构建失败（强制隐藏）
+sensitive_words_manual.txt        # 期望隐藏词：尽量隐藏，残留只告警
+tools/keywords.mjs                # 关键词转义与泄露检查（build-kernel --check 也会跑）
 tools/deobfuscate.mjs             # 解码：压缩产物 → 明文（重命名 + 注释）
 tools/obfuscate.mjs               # 混淆：明文 → 随机短名 + 字符串转义 + 惰性噪音
 tools/build-kernel.mjs            # 混淆工作流：plain/_worker.js → _worker.js + pages.zip（五道门槛）

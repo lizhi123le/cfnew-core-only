@@ -52,6 +52,7 @@ import {
 } from './obfuscate.mjs';
 import { JO_PRESETS, joDependencyVersion, obfuscateWithJavaScriptObfuscator } from './engine-javascript-obfuscator.mjs';
 import { canonicalize } from './verify-alpha.mjs';
+import { findKeywordLeaks, findKeywordLeaksInModuleSpecifiers, hideKeywordsInCode, loadKeywordLists } from './keywords.mjs';
 
 const TOOLS = import.meta.dirname;
 const ROOT = path.resolve(TOOLS, '..');
@@ -65,6 +66,7 @@ const PATHS = {
 };
 
 const WORKER_ENTRY = '_worker.js';
+const KEYWORDS = loadKeywordLists();
 const SEED_FILE = process.env.CFNEW_SEED_FILE || SEED_PATH;
 const PROBE_UUID = '8f0c1d2e-3a4b-4c5d-8e9f-0a1b2c3d4e5f';
 const ENGINES = new Set(['builtin', 'javascript-obfuscator']);
@@ -201,7 +203,11 @@ export async function buildArtifacts({
       targetBytes,
       sizeRange,
     });
-    const code = result.code.endsWith('\n') ? result.code : `${result.code}\n`;
+
+    // 关键词隐藏（JO 引擎在所选预设之外再兜一层）：只转义命中的字符，值不变。
+    const keywordHide = hideKeywordsInCode(result.code, [...KEYWORDS.auto, ...KEYWORDS.manual]);
+    const resultCode = keywordHide.code;
+    const code = resultCode.endsWith('\n') ? resultCode : `${resultCode}\n`;
     const totalBytes = Buffer.byteLength(result.code);
     const version = readPlainVersion(plainSource);
     if (!version) throw new Error('明文里找不到 `const CORE_VERSION = "..."`');
@@ -215,6 +221,18 @@ export async function buildArtifacts({
 
     const ast = parse(code, { sourceType: 'module' });
     if (!hasDefaultExport(ast)) throw new Error('产物没有 default 导出，Workers/Pages 无法加载');
+    const hardLeaks = findKeywordLeaks(code, KEYWORDS.auto);
+    if (hardLeaks.length) {
+      throw new Error(
+        `产物里仍有硬性禁止词以明文出现：${hardLeaks.map((l) => l.word).join(', ')}。` +
+          '这些位置无法用字符串转义隐藏（例如模块说明符/正则/标识符），请调整词表或换 builtin 引擎。'
+      );
+    }
+    const expectedLeaks = findKeywordLeaks(code, KEYWORDS.manual);
+    if (expectedLeaks.length) {
+      console.warn(`⚠️ 期望隐藏词仍可见：${expectedLeaks.map((l) => l.word).join(', ')}`);
+    }
+    const moduleHits = findKeywordLeaksInModuleSpecifiers(code, KEYWORDS.auto);
     const probe = await probeRuntime({ code, version });
 
     const zip = createZip([{ name: WORKER_ENTRY, data: Buffer.from(code, 'utf8') }]);
@@ -234,6 +252,7 @@ export async function buildArtifacts({
         seed,
         dependency: result.version,
         joStats: result.stats,
+        keywords: { hidden: keywordHide.hidden, hardLeaks, expectedLeaks, moduleHits },
         targetBytes,
         coreBytes: totalBytes,
         noiseBytes: 0,
@@ -313,6 +332,20 @@ export async function buildArtifacts({
   // 门槛 5：噪音惰性
   assertInertNoise(result.noise);
 
+  // 门槛 6：关键词（auto 硬性禁止，manual 期望隐藏）
+  const hardLeaks = findKeywordLeaks(result.core, KEYWORDS.auto);
+  if (hardLeaks.length) {
+    throw new Error(
+      `产物里仍有硬性禁止词以明文出现：${hardLeaks.map((l) => l.word).join(', ')}。` +
+        '请检查 tools/keywords.mjs 的覆盖范围（模块说明符/正则/标识符不参与隐藏）或调整 sensitive_words_auto.txt。'
+    );
+  }
+  const expectedLeaks = findKeywordLeaks(result.core, KEYWORDS.manual);
+  if (expectedLeaks.length) {
+    console.warn(`⚠️ 期望隐藏词仍可见：${expectedLeaks.map((l) => l.word).join(', ')}`);
+  }
+  const moduleHits = findKeywordLeaksInModuleSpecifiers(result.core, KEYWORDS.auto);
+
   // 运行时契约探针（两种引擎共用；面板 55 项测试在 check.sh 里跑）
   const probe = await probeRuntime({ code, version: result.version });
 
@@ -328,6 +361,7 @@ export async function buildArtifacts({
     dependency: null,
     seed: result.stats.seed,
     probe,
+    keywords: { hidden: result.stats.keywordsHidden || 0, hardLeaks, expectedLeaks, moduleHits },
     stats: result.stats,
     hashes: { worker: sha256(code), zip: sha256(zip) },
   };
@@ -376,6 +410,16 @@ function printStats(artifacts, seedSource) {
     console.log(`   运行时探针：coreVersion ${artifacts.probe.coreVersion}，配置字段 ${artifacts.probe.configKeys} 个，region=${artifacts.probe.region}`);
   }
   console.log(`   _worker.js：sha256 ${artifacts.hashes.worker.slice(0, 16)}…；pages.zip：${humanBytes(artifacts.zip.length)}，sha256 ${artifacts.hashes.zip.slice(0, 16)}…`);
+  if (artifacts.keywords) {
+    const k = artifacts.keywords;
+    console.log(
+      `   关键词：隐藏 ${k.hidden} 处；硬性泄露 ${k.hardLeaks.length}；期望泄露 ${k.expectedLeaks.length}`
+    );
+    if (k.moduleHits && k.moduleHits.length) {
+      const detail = [...new Set(k.moduleHits.map((h) => `${h.snippet}（含 ${h.word}）`))].join('、');
+      console.log(`   结构性例外：${detail} —— 模块说明符必须保持原文（cfnew-panel 测试靠它打桩）`);
+    }
+  }
   for (const msg of s.missingBindings) console.log(`   ! ${msg}`);
   if (s.unmappedSemantics.length) {
     console.log(`   ! ${s.unmappedSemantics.length} 个语义名在明文里没有对应声明：${s.unmappedSemantics.join(', ')}`);

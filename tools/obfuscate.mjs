@@ -45,6 +45,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { parse } from '@babel/parser';
+import { hideKeywordsInCode, loadKeywordLists } from './keywords.mjs';
 import _traverse from '@babel/traverse';
 import _generate from '@babel/generator';
 
@@ -62,6 +63,9 @@ export const DEFAULT_PATHS = {
 };
 
 export const SEED_PATH = path.join(TOOLS, 'obfuscate.seed.json');
+
+// 关键词词表（auto=硬性禁止，manual=期望隐藏），缺失时为空表。
+const KEYWORDS = loadKeywordLists();
 
 export const DEFAULTS = {
   mangle: 'all', // all：全部绑定随机短名；mapped：只换解码参数覆盖的声明；upstream：还原上游短名（不随机）
@@ -781,6 +785,10 @@ export function obfuscate({
     jsescOption: { minimal: true },
   }).code;
 
+  // 关键词隐藏先做：只转义命中的字符，字符串值不变；随后体积预算在剩余空间里分配。
+  const keywordResult = hideKeywordsInCode(core, [...KEYWORDS.auto, ...KEYWORDS.manual]);
+  if (keywordResult.hidden > 0) core = keywordResult.code;
+
   const escapedInfo = escapeStringLiterals(core, rng, escape, { targetBytes, noiseCap: noiseBytes });
   core = escapedInfo.code;
 
@@ -814,6 +822,8 @@ export function obfuscate({
     missingBindings,
     escapedStrings: escapedInfo.escaped,
     skippedStrings: escapedInfo.skipped,
+    keywordsHidden: keywordResult.hidden,
+    keywordHits: keywordResult.words,
     coreBytes: Buffer.byteLength(core),
     noiseBytes: Buffer.byteLength(noise),
     totalBytes: Buffer.byteLength(code),

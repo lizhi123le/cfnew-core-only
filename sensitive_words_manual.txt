@@ -1,0 +1,16 @@
+# 移植自 BPB-Worker-Panel 的同名词表；本仓库由 tools/keywords.mjs 读取并在 build-kernel 中检查。
+# 指纹观察词表（仅提示，不会让构建失败）
+#
+# 这些属于"希望被隐藏、但不阻塞构建"的特征串。verify.mjs 命中时只打印 WARN，
+# 便于你观察某一版产物是否把某个特征漏在了外面。
+#
+# 注意：这里只放**能靠 stringConcealing 藏起来**的东西（字符串字面量，以及被
+# scripts/harden-source.mjs 改写过的属性键 / 模板片段）。运行时全局名（如
+# DecompressionStream）或必须保持原样的标识符不该放进来 —— 它们要么无法隐藏，
+# 要么会让构建永远处于"警告"状态。真要保证某个词绝不出现，放进 auto 表。
+
+speedtest.net
+dns-query
+proxy-ip
+workers.dev
+pages.dev

@@ -1,10 +1,10 @@
 {
-  "seed": 1814399422,
+  "seed": 3474489812,
   "engine": "builtin",
   "mangle": "all",
   "escape": "budget",
   "noiseBytes": 4096,
-  "targetBytes": 37500,
+  "targetBytes": 39500,
   "sizeMin": 32000,
   "sizeMax": 42000
 }

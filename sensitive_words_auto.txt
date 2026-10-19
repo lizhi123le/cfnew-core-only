@@ -1,0 +1,74 @@
+# 移植自 BPB-Worker-Panel 的同名词表；本仓库由 tools/keywords.mjs 读取并在 build-kernel 中检查。
+# 硬性禁止词表（verify.mjs 命中即构建失败）
+#
+# 这些词必须在本仓库产物里彻底消失（明文、注释、标识符、转义串都不许出现）。
+# 用途：
+#  1) verify.mjs 的明文泄露检查（\b词\b，大小写不敏感）；
+#  2) obfuscate.mjs 的强制密文化（不受 min/max 长度限制）。
+# 每行一个，空行与 # 开头行忽略。
+#
+# 标识符形态（属性键、模板静态片段、内置全局名）由 scripts/harden-source.mjs 在混淆前
+# 改写成字符串字面量，因此这里可以放心收词：命中即失败，而不是"永远失败的警告"。
+
+bpb
+ipv
+ips
+sub
+dns
+ech
+mix
+tun
+port
+erver
+roxie
+rout
+rule
+outb
+sing
+xray
+offic
+clash
+v2ray
+client
+query
+irect
+osite
+omain
+proxy
+reality
+cidr
+country
+panel
+private
+etwork
+worker
+lobal
+reject
+SniList
+eoip
+subPath
+alpn
+clean
+block
+region
+pool
+match
+type
+protocol
+config
+peedtest
+bia-pain-bache
+yousef.isegaro
+isegaro
+vless
+trojan
+shadowsocks
+vmess
+cloudflare-ech.com
+bpb.yousef
+proxyip
+cfnew
+edgetunnel
+cmliu
+joey
+sock

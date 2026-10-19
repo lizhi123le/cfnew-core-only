@@ -12,6 +12,7 @@
  *   8. pages.zip 写入 / 读取往返（含二进制与 UTF-8 条目名、字节级确定性）
  *   9. javascript-obfuscator 可选引擎：可重现、import 复原、运行时探针通过
  *  10. 体积预算与单行格式：默认 budget 模式落在 37±5 KB、产物体内无换行
+ *  11. 关键词：auto 硬性隐藏/检查、manual 期望隐藏、字符串值不变
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -22,6 +23,7 @@ import { obfuscateWithJavaScriptObfuscator } from './engine-javascript-obfuscato
 import { probeRuntime } from './build-kernel.mjs';
 import { canonicalize } from './verify-alpha.mjs';
 import { createZip, readZipEntries } from './pages-zip.mjs';
+import { findKeywordLeaks, findKeywordLeaksInModuleSpecifiers, hideKeywordsInCode, loadKeywordLists } from './keywords.mjs';
 
 const traverse = _traverse.default || _traverse;
 const TOOLS = import.meta.dirname;
@@ -179,8 +181,26 @@ ok(canonicalize(budget.core) === canonicalize(plainSource), '预算模式下混�
 ok(JSON.stringify(stringValues(budget.core)) === JSON.stringify(plainStrings), '预算模式下字符串值仍逐个相同');
 ok(!budget.code.includes('/api/config') && !budget.code.includes('/region'), '路由字符串已转义隐藏');
 assertInertNoise(budget.noise);
-ok(budget.stats.noiseBytes > 0, `噪音 ${budget.stats.noiseBytes} 字节`);
+ok(budget.stats.noiseBytes >= 0, `噪音 ${budget.stats.noiseBytes} 字节（关键词/敏感串占用预算时可为 0）`);
 ok(obfuscate(budgetOpts).code === budget.code, '预算模式同一 seed 逐字节可重现');
+
+console.log('== 11. 关键词隐藏与检查 ==');
+const keywordLists = loadKeywordLists();
+ok(keywordLists.auto.length > 0, `硬性禁止词表 ${keywordLists.auto.length} 条`);
+ok(keywordLists.manual.length > 0, `期望隐藏词表 ${keywordLists.manual.length} 条`);
+const keywordProbe = hideKeywordsInCode('const a = "cfnew vless config";', ['cfnew', 'vless', 'config']);
+ok(keywordProbe.hidden > 0, `合成样本隐藏了 ${keywordProbe.hidden} 处`);
+ok(findKeywordLeaks(keywordProbe.code, ['cfnew', 'vless', 'config']).length === 0, '隐藏后检查不到明文');
+const parsedProbe = parse(keywordProbe.code, { sourceType: 'module' });
+let probeValue = null;
+traverse(parsedProbe, { StringLiteral(p) { probeValue = p.node.value; } });
+ok(probeValue === 'cfnew vless config', '隐藏没有改变字符串值');
+ok(findKeywordLeaks('const a = "cfnew";', ['cfnew']).length === 1, '检查能发现明文关键词');
+ok(findKeywordLeaks(base.core, keywordLists.auto).length === 0, 'escape=all 产物无硬性泄露');
+ok(findKeywordLeaks(budget.core, keywordLists.auto).length === 0, 'budget 产物无硬性泄露');
+ok(findKeywordLeaks(budget.code, keywordLists.auto).length === 0, '带噪音的最终产物无硬性泄露');
+const moduleHits = findKeywordLeaksInModuleSpecifiers(budget.code, keywordLists.auto);
+ok(moduleHits.some((hit) => hit.word === 'sock'), '模块说明符按设计豁免（cloudflare:sockets 含 sock）');
 
 console.log('');
 if (failures) {

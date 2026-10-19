@@ -41,6 +41,13 @@ export function canonicalize(source) {
     }
   }
   traverse(ast, {
+    // 模板静态片段按 cooked 值归一化：关键词隐藏会把 `type` 写成 `\x74ype`，
+    // 但运行时值不变；生成器默认按 raw 打印，会让 alpha 误判。
+    TemplateElement(p) {
+      if (p.node.value.cooked !== null && p.node.value.cooked !== undefined) {
+        p.node.value.raw = p.node.value.cooked;
+      }
+    },
     enter(p) {
       delete p.node.extra;
       p.node.leadingComments = null;

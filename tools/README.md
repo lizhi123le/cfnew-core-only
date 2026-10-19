@@ -116,6 +116,23 @@ node build-kernel.mjs --engine=builtin            # 切回默认
 代价：外部引擎的产物**无法再用 AST alpha 做静态证明**（字符串数组/控制流会改变 AST），
 因此门槛改为「运行时契约探针 + 面板 55 项测试」；`balanced` 还有每次字符串访问的解码开销。
 
+## 关键词：指定隐藏 / 期望隐藏 / 检查
+
+词表放在仓库根目录（每行一个，空行与 `#` 注释忽略）：
+
+- `sensitive_words_auto.txt`：**指定隐藏**。字符串/模板里命中即强制转义；构建结束时再检查一次，
+  只要还有明文残留就直接失败。
+- `sensitive_words_manual.txt`：**期望隐藏**。同样优先转义；仍有残留只打印 WARN，不阻塞构建。
+
+实现见 `tools/keywords.mjs`：只转义命中的字符（`type` → `\x74ype`），字符串值不变，
+比整串转义省体积；`build-kernel.mjs` 在写文件前调用 `findKeywordLeaks` 复查。
+
+范围限制：import/export 的模块说明符必须保持原文（面板测试靠 `cloudflare:sockets` 打桩），
+标识符与属性名也不改写（属性名是面板 JSON 契约），因此这些位置不参与隐藏与检查。
+`build-kernel` 会把模块说明符里的命中作为**结构性例外**显式打印（例如 `cloudflare:sockets` 含 `sock`），
+而不是悄悄跳过；要让它彻底消失只能改写模块说明符，但那会让 cfnew-panel 的打桩正则失效。
+词表路径可用 `CFNEW_KEYWORDS_AUTO` / `CFNEW_KEYWORDS_MANUAL` 覆盖。
+
 ## 面板接口为什么不会被破坏
 
 混淆只动「标识符名字」和「字符串的书写方式」，不动任何值：
@@ -136,12 +153,13 @@ node build-kernel.mjs --engine=builtin            # 切回默认
 | --- | --- |
 | `deobfuscate.mjs` | **解码**：读 `_worker.pretty.js` + `names.json` + `comments.json`，做作用域安全重命名并插注释，生成 `plain/_worker.js` |
 | `obfuscate.mjs` | **内置混淆引擎**：明文 → 随机短名 + 字符串转义 + 惰性噪音。改名前记录每个引用的绑定，改名后逐个复核，任何「引用被捕获 / 被遮蔽」都会拒绝输出；`--core` 可只输出混淆核供 alpha 校验 |
+| `keywords.mjs` | **关键词**：读取根目录 `sensitive_words_auto.txt`（硬性禁止）与 `sensitive_words_manual.txt`（期望隐藏），把字符串/模板里命中的字符转义成 `\xHH` / `\uHHHH`；`findKeywordLeaks` 供构建闸门复查 |
 | `engine-javascript-obfuscator.mjs` | **可选混淆引擎**：封装 `javascript-obfuscator`（预设 light/balanced、`tools/obfuscator.config.json` 参数覆盖、危险参数拦截、import 说明符复原） |
 | `build-kernel.mjs` | **混淆工作流**：`plain/_worker.js` → `_worker.js` + `pages.zip`。builtin 引擎过 alpha/字符串值/版本/导出/噪音/单行体积六道门槛；两种引擎都过「运行时契约探针」；`--check` 只校验、`--dry-run` 只看差异；默认每次换种子，`--reuse-seed` 复用记录里的种子 |
 | `pages-zip.mjs` | 确定性 ZIP 写入/读取（固定 DOS 时间戳、零依赖）；内容不变时不重写 `pages.zip` |
 | `align.mjs` | **上游升级后的自动对齐**：给新旧两版每个实体算结构指纹（标识符全部抹成 `_`），做 LCS 平移名字；无法匹配的新函数进报告待人工命名 |
 | `verify-alpha.mjs` | **等价校验**：两份源码所有绑定统一改名为 `c0、c1…`，抹掉注释/位置/字面量写法后逐字符比较。对**混淆核**（不含噪音）使用；`build-kernel --check` 已内置 |
-| `check.sh` | 一道命令跑完五道硬门槛：align 自测 + 混淆自测 + 产物可重现 + 面板 55 项（明文）+ 面板 55 项（混淆产物） |
+| `check.sh` | 一道命令跑完五道硬门槛：align 自测 + 混淆自测 + 产物可重现（含关键词检查）+ 面板 55 项（明文）+ 面板 55 项（混淆产物） |
 | `release.sh` | 按 `plain/_worker.js` 的 `CORE_VERSION` 打包并发布 Release；发布前会跑 `build-kernel --check` |
 | `merge-upstream.sh` | **同步上游**：先把上游 `_worker.js` / `pages.zip` 提交为解码输入，再合并上游分支。`README.md` 冲突段落保留本仓库版本、`.gitignore` 取双方并集、`.github/` 始终保留本仓库版本（不并入上游 CI），其余文件冲突中止并交人工 |
 | `self-test-align.mjs` | align 的回归自测：造「行号整体下移 + 版本号变更」的假升级版，断言命名 100% 继承 |
