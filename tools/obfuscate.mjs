@@ -36,9 +36,11 @@
  *   node tools/obfuscate.mjs --core             # 只输出混淆核（不含噪音，便于 verify-alpha）
  *   node tools/obfuscate.mjs --stdout           # 打印到 stdout（调试）
  *   node tools/obfuscate.mjs --keep-comments    # 保留注释（调试）
+ *   node tools/obfuscate.mjs --one-line=false   # 多行输出（默认单行）
  *
+ * 单行格式与体积预算可写在仓库根目录 harden.config.json（CLI > 环境变量 > 配置文件 > 默认值）。
  * 环境变量：CFNEW_PLAIN / CFNEW_PRETTY / CFNEW_NAMES / CFNEW_OUT /
- *           CFNEW_SEED / CFNEW_MANGLE / CFNEW_ESCAPE / CFNEW_NOISE
+ *           CFNEW_SEED / CFNEW_MANGLE / CFNEW_ESCAPE / CFNEW_NOISE / CFNEW_ONE_LINE
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -46,6 +48,7 @@ import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { parse } from '@babel/parser';
 import { hideKeywordsInCode, loadKeywordLists } from './keywords.mjs';
+import { loadHardenParams } from './harden-config.mjs';
 import _traverse from '@babel/traverse';
 import _generate from '@babel/generator';
 
@@ -72,6 +75,7 @@ export const DEFAULTS = {
   escape: 'budget', // budget：按 --target-size 预算转义；all：全部转义；partial：一半左右；none：不转义
   noiseBytes: 4096, // 噪音上限（budget 模式下受体积预算限制）
   targetBytes: 39500, // budget 模式的目标产物体积（内容字节数，不含末尾换行）
+  oneLine: true, // 产物是否压成一行（harden.config.json / CFNEW_ONE_LINE / --one-line=false）
 };
 
 const MANGLE_MODES = new Set(['all', 'mapped', 'upstream']);
@@ -148,6 +152,7 @@ export function loadSeedRecord(seedPath = SEED_PATH) {
   for (const key of ['noiseBytes', 'targetBytes', 'sizeMin', 'sizeMax']) {
     if (Number.isInteger(raw[key])) record[key] = raw[key];
   }
+  if (typeof raw.oneLine === 'boolean') record.oneLine = raw.oneLine;
   return record;
 }
 
@@ -160,6 +165,7 @@ export function saveSeedRecord({ seed, engine = 'builtin', joPreset = 'auto', ..
   for (const key of ['noiseBytes', 'targetBytes', 'sizeMin', 'sizeMax']) {
     if (Number.isInteger(rest[key])) clean[key] = rest[key];
   }
+  if (typeof rest.oneLine === 'boolean') clean.oneLine = rest.oneLine;
   fs.writeFileSync(seedPath, JSON.stringify(clean, null, 2) + '\n');
   return clean;
 }
@@ -176,7 +182,19 @@ export function randomSeed() {
 export function parseCliArgs(argv) {
   const flags = new Set();
   const opts = new Map();
-  const takesValue = new Set(['seed', 'mangle', 'escape', 'noise', 'target-size', 'size-min', 'size-max']);
+  const takesValue = new Set([
+  'seed',
+  'mangle',
+  'escape',
+  'noise',
+  'target-size',
+  'size-min',
+  'size-max',
+  'target-bytes',
+  'target-zip',
+  'max-runs',
+  'config',
+]);
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (!arg.startsWith('--')) continue;
@@ -606,10 +624,10 @@ function randomWord(rng, minLength, maxLength) {
 }
 
 /**
- * 生成惰性噪音：只包含顶层函数声明与随机注释，**全部拼在一行里**。
+ * 生成惰性噪音：只包含顶层函数声明与随机注释。单行模式下拼成一行，多行模式按声明换行。
  * 这些函数从未被引用，加载时不会执行；函数体里的代码也就永远不会被求值。
  */
-function buildNoise({ rng, maxBytes, taken }) {
+function buildNoise({ rng, maxBytes, taken, oneLine = true }) {
   if (maxBytes <= 0) return '';
   const parts = [];
   let total = 0;
@@ -643,7 +661,7 @@ function buildNoise({ rng, maxBytes, taken }) {
     total += decl.length;
     written += 1;
   }
-  return parts.join('');
+  return parts.join(oneLine ? '' : '\n');
 }
 
 /** 校验噪音块：独立解析后，顶层语句必须全是函数声明（因此不可能有副作用）。 */
@@ -678,6 +696,7 @@ export function obfuscate({
   escape = DEFAULTS.escape,
   noiseBytes = DEFAULTS.noiseBytes,
   targetBytes = DEFAULTS.targetBytes,
+  oneLine = DEFAULTS.oneLine,
   keepComments = false,
 }) {
   const normalizedSeed = normalizeSeed(seed);
@@ -780,8 +799,8 @@ export function obfuscate({
 
   let core = generate(ast, {
     comments: keepComments,
-    compact: true,
-    minified: !keepComments,
+    compact: oneLine,
+    minified: oneLine && !keepComments,
     jsescOption: { minimal: true },
   }).code;
 
@@ -801,7 +820,7 @@ export function obfuscate({
   const coreTaken = collectIdentifierNames(parseModule(core));
   for (const name of taken) coreTaken.add(name);
   for (const word of RESERVED) coreTaken.add(word);
-  const noise = buildNoise({ rng, maxBytes: escapedInfo.noiseBudget, taken: coreTaken });
+  const noise = buildNoise({ rng, maxBytes: escapedInfo.noiseBudget, taken: coreTaken, oneLine });
   assertInertNoise(noise);
 
   const versionBinding = versionBindingRef
@@ -810,14 +829,16 @@ export function obfuscate({
       ? reverse.get('CORE_VERSION').orig
       : null;
 
-  // 一行格式：混淆核本身单行，噪音也拼在同一个行里（用 ; 隔开更稳妥）
-  const code = noise ? `${core};${noise}` : core;
+  // 单行格式：混淆核本身单行，噪音也拼在同一个行里（用 ; 隔开更稳妥）。
+  // 多行格式（oneLine=false）只影响可读性，不改变 AST / 字符串值。
+  const code = noise ? (oneLine ? `${core};${noise}` : `${core}\n${noise}`) : core;
 
   const stats = {
     seed: normalizedSeed,
     mangle,
     escape,
     targetBytes,
+    oneLine,
     declarations,
     mapped: reverse.size,
     renamed,
@@ -874,6 +895,7 @@ function main() {
   }
 
   const { mangle, escape, noiseBytes, targetBytes } = resolveObfuscationOptions({ opts, env: process.env });
+  const harden = loadHardenParams({ opts, flags, env: process.env });
   const coreOnly = flags.has('core');
   const result = obfuscate({
     plainSource,
@@ -884,6 +906,7 @@ function main() {
     escape,
     noiseBytes: coreOnly ? 0 : noiseBytes,
     targetBytes,
+    oneLine: harden.oneLine,
     keepComments: flags.has('keep-comments'),
   });
   const code = `${coreOnly ? result.core : result.code}\n`;
@@ -897,7 +920,7 @@ function main() {
   const s = result.stats;
   console.error(`混淆模式 ${s.mangle} / escape=${s.escape}${coreOnly ? '（仅混淆核）' : ''}，种子 ${s.seed}（${seedSource}）`);
   console.error(`  反向映射 ${s.mapped} 条；重命名 ${s.renamed} 个绑定；转义 ${s.escapedStrings} 个字符串`);
-  console.error(`  混淆核 ${s.coreBytes} 字节 + 噪音 ${s.noiseBytes} 字节 = ${s.totalBytes} 字节（目标 ${s.targetBytes}，单行）`);
+  console.error(`  混淆核 ${s.coreBytes} 字节 + 噪音 ${s.noiseBytes} 字节 = ${s.totalBytes} 字节（目标 ${s.targetBytes}，${s.oneLine ? '单行' : '多行'}）`);
   if (s.unmappedSemantics.length) {
     console.error(`  ! ${s.unmappedSemantics.length} 个语义名在明文里没找到声明：${s.unmappedSemantics.join(', ')}`);
   }

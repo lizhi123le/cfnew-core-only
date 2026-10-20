@@ -54,10 +54,44 @@ _worker.pretty.js ──deobfuscate──▶ plain/_worker.js ──obfuscate─
 | `--escape` | `budget` / `all` / `partial` / `none` | `budget` | builtin 引擎：`budget` 按体积目标分配转义；`all/partial/none` 为显式控制（不保证体积区间） |
 | `--target-size` | 20000..200000 | `39500` | budget 模式的目标体积（内容字节数）；落在 37±5 KB 区间 |
 | `--size-min` / `--size-max` | 整数 | `32000` / `42000` | budget 模式允许的体积区间，越界直接构建失败 |
+| `--target-bytes` | 体积写法（见下） | 配置文件/不限制 | `_worker.js` 原始字节**上限预算**；`0` 关闭 |
+| `--target-zip` | 体积写法（见下） | 配置文件/不限制 | `pages.zip`（DEFLATE）字节**上限预算**；`0` 关闭 |
+| `--max-runs` | 正整数 | `1` | 体积预算搜索最多渲染几次（配置文件里通常写 20） |
+| `--one-line` | `true` / `false` | `true` | 产物是否压成一行；也可用 `--no-one-line` |
+| `--config` | 路径 | `harden.config.json` | 指定体积/单行参数配置文件 |
 | `--noise` | 非负整数（字节） | `4096` | builtin 引擎：噪音上限（budget 模式下受剩余预算限制）；`0` 关闭 |
 
 环境变量：`CFNEW_ENGINE`、`CFNEW_JO_PRESET`、`CFNEW_SEED`、`CFNEW_REUSE_SEED`、`CFNEW_MANGLE`、
-`CFNEW_ESCAPE`、`CFNEW_TARGET_SIZE`、`CFNEW_NOISE`。
+`CFNEW_ESCAPE`、`CFNEW_TARGET_SIZE`、`CFNEW_NOISE`；体积/单行参数为 `CFNEW_TARGET_BYTES`、
+`CFNEW_TARGET_ZIP_BYTES`、`CFNEW_MAX_RUNS`、`CFNEW_ONE_LINE`、`CFNEW_HARDEN_CONFIG`
+（同时兼容同名的 `HARDEN_*` 写法）。
+
+### 体积预算与 harden.config.json
+
+仓库根目录的 `harden.config.json` 是可选的体积/单行参数文件，只放四项：
+
+```json
+{
+  "targetBytes": "522k",
+  "targetZipBytes": "232k",
+  "maxRuns": 20,
+  "oneLine": true
+}
+```
+
+优先级：**CLI > 环境变量 > 本文件 > 默认值**。体积写法支持 `320000`、`320k`（1024 进制）、`1m`、
+`75%`（相对本次构建的**首次混淆产物**：raw 相对 raw，zip 相对 zip）；`0` 表示关闭该限制。
+
+`targetBytes` / `targetZipBytes` 是**上限预算**，和 `--target-size`（"想把产物填充到多大"）不是一回事：
+
+- 首次产物超出预算时，按 `maxRuns` 依次尝试更保守的参数（先关噪音，再降转义强度，最后换种子），
+  一达标就停；全部失败则构建失败并报告最后一组大小；
+- 配置了任一体积预算后，不再套用默认的 32–42 KB 区间；`0` 则完全不检查该上限；
+- `oneLine: false`（或 `--one-line=false`）输出多行，体积不再受默认区间约束；
+- 当前仓库的 `522k` / `232k` 远大于本内核约 39 KB 的产物，所以日常构建不会被这两个预算改变；
+  想压缩体积时，把预算设在约 39.2–39.5 KB 之间（低于混淆核本身的 39,242 B 不可能达成），或写一个
+  略低于 100% 的百分比，例如 `99.5%`。
+
 
 **默认每次构建都会换新随机种子**（两个引擎一致），所以重复执行 `node build-kernel.mjs` 会得到不同的产物。
 每次使用的种子会写进 `tools/obfuscate.seed.json`（连同引擎/预设/体积参数），`--check` 用这份记录重新生成，
@@ -65,7 +99,7 @@ _worker.pretty.js ──deobfuscate──▶ plain/_worker.js ──obfuscate─
 想要可复现/不换种子时用 `--reuse-seed`（或显式 `--seed N`）。
 
 预算策略：先转义路由（`/...`），再转义配置字段名，剩余预算一半给随机字符串、一半给噪音；
-产物始终是**单行**（噪音也拼在同一行），默认约 39.4 KB。
+默认产物是**单行**（噪音也拼在同一行），约 39.4 KB；`oneLine: false` 时改为多行排版，语义不变。
 
 ## 引擎：内置（默认） vs javascript-obfuscator
 
@@ -194,6 +228,9 @@ node build-kernel.mjs --seed 12345  # 显式指定种子（会记录，之后 --
 node build-kernel.mjs --target-size=38000          # 体积目标（默认 39500，允许 32..42 KB）
 node build-kernel.mjs --size-min=33000 --size-max=41000   # 自定义允许区间
 node build-kernel.mjs --escape=partial --noise=2048       # 显式控制转义/噪音（不再保证体积区间）
+node build-kernel.mjs --target-bytes=38k --target-zip=20k --max-runs=20  # 体积预算（上限）
+node build-kernel.mjs --one-line=false                     # 多行输出
+node build-kernel.mjs --config=./my-harden.json            # 指定配置文件
 
 # 手工确认混淆核与明文等价（不含噪音）
 node obfuscate.mjs --core --stdout > core.js

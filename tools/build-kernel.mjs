@@ -19,6 +19,11 @@
  * 引擎与种子记录在 tools/obfuscate.seed.json（{ seed, engine, joPreset }），
  * 所以 --check 不需要额外参数就能复现。
  *
+ * 体积预算 / 单行格式由仓库根目录 harden.config.json 提供（可选）：
+ *   { "targetBytes": "522k", "targetZipBytes": "232k", "maxRuns": 20, "oneLine": true }
+ * 优先级 CLI > 环境变量 > 配置文件 > 默认值；targetBytes/targetZipBytes 是上限预算，
+ * 支持 320000 / 320k / 1m / 75%（相对首次混淆产物）/ 0（关闭）。
+ *
  * 用法：
  *   node tools/build-kernel.mjs                     # 用当前引擎/种子重建并替换
  *   node tools/build-kernel.mjs --check             # 只校验可重现（CI 用）
@@ -26,10 +31,13 @@
  *   node tools/build-kernel.mjs --randomize         # 换随机种子后重建
  *   node tools/build-kernel.mjs --engine=javascript-obfuscator --jo-preset=balanced
  *   node tools/build-kernel.mjs --seed 12345
+ *   node tools/build-kernel.mjs --target-bytes=522k --target-zip=232k --max-runs=20
+ *   node tools/build-kernel.mjs --one-line=false
  *
  * 环境变量：CFNEW_ENGINE / CFNEW_JO_PRESET / CFNEW_SEED / CFNEW_MANGLE / CFNEW_ESCAPE /
- *           CFNEW_NOISE / CFNEW_JO_CONFIG，以及路径覆盖 CFNEW_PLAIN / CFNEW_PRETTY /
- *           CFNEW_NAMES / CFNEW_OUT / CFNEW_ZIP
+ *           CFNEW_NOISE / CFNEW_JO_CONFIG，体积/单行参数 CFNEW_TARGET_BYTES /
+ *           CFNEW_TARGET_ZIP_BYTES / CFNEW_MAX_RUNS / CFNEW_ONE_LINE，
+ *           以及路径覆盖 CFNEW_PLAIN / CFNEW_PRETTY / CFNEW_NAMES / CFNEW_OUT / CFNEW_ZIP
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -52,6 +60,7 @@ import {
   SEED_PATH,
 } from './obfuscate.mjs';
 import { JO_PRESETS, joDependencyVersion, obfuscateWithJavaScriptObfuscator } from './engine-javascript-obfuscator.mjs';
+import { loadHardenParams } from './harden-config.mjs';
 import { canonicalize } from './verify-alpha.mjs';
 import {
   findKeywordLeaks,
@@ -211,31 +220,169 @@ export async function buildArtifacts({
   noiseBytes,
   targetBytes,
   sizeRange,
+  harden = null,
 }) {
-  if (engine === 'javascript-obfuscator') {
-    const result = obfuscateWithJavaScriptObfuscator({
-      source: plainSource,
-      seed,
-      preset: joPreset,
-      targetBytes,
-      sizeRange,
-    });
+  // ── 体积预算（harden.config.json）──────────────────────────────────────
+  // targetBytes / targetZipBytes 是**上限预算**；0/缺省表示不限制。
+  // 百分比在量到「首次混淆产物」后解析；maxRuns 限制体积搜索最多渲染几次。
+  const oneLine = harden ? harden.oneLine : true;
+  const provided = harden ? harden.provided : {};
+  const sizeSearchEnabled = Boolean(provided.targetBytes || provided.targetZipBytes);
+  const legacySizeGate = !sizeSearchEnabled && oneLine; // 多行格式不再强求 32..42 KB
+  const maxRuns = sizeSearchEnabled ? Math.max(1, harden.maxRuns) : 1;
+  const joSizeRange = legacySizeGate ? sizeRange : null;
 
-    // 关键词隐藏（JO 引擎在所选预设之外再兜一层）：只转义命中的字符，值不变。
-    const keywordHide = hideKeywordsInCode(result.code, [...KEYWORDS.auto, ...KEYWORDS.manual], {
-      includeModuleSpecifiers: true,
-      includeImportIdentifiers: true,
-      randomize: true,
-      rng: mulberry32(seed),
+  const zipFor = (code) => createZip([{ name: WORKER_ENTRY, data: Buffer.from(code, 'utf8') }]);
+
+  const render = (spec) => {
+    // 有上限预算时，budget 模式的填充目标不超过预算：既不会先撑大再回退，
+    // 也能让敏感字符串/路由优先占用有限的体积。预算按最终文件字节数计，
+    // 而 obfuscate 的 targetBytes 是内容字节数（不含末尾换行），所以先扣掉换行。
+    const fillTarget = rawBudget
+      ? Math.min(targetBytes, Math.max(1, rawBudget - 1))
+      : targetBytes;
+    if (engine === 'javascript-obfuscator') {
+      const result = obfuscateWithJavaScriptObfuscator({
+        source: plainSource,
+        seed: spec.seed,
+        preset: joPreset,
+        targetBytes: fillTarget,
+        sizeRange: joSizeRange,
+        oneLine,
+      });
+      // 关键词隐藏（JO 引擎在所选预设之外再兜一层）：只转义命中的字符，值不变。
+      const keywordHide = hideKeywordsInCode(result.code, [...KEYWORDS.auto, ...KEYWORDS.manual], {
+        includeModuleSpecifiers: true,
+        includeImportIdentifiers: true,
+        randomize: true,
+        rng: mulberry32(spec.seed),
+      });
+      const resultCode = keywordHide.code;
+      const code = resultCode.endsWith('\n') ? resultCode : `${resultCode}\n`;
+      return { spec, result, keywordHide, resultCode, code };
+    }
+    const result = obfuscate({
+      plainSource,
+      prettySource,
+      names,
+      seed: spec.seed,
+      mangle,
+      escape: spec.escape,
+      noiseBytes: spec.noiseBytes,
+      targetBytes: fillTarget,
+      oneLine,
     });
-    const resultCode = keywordHide.code;
-    const code = resultCode.endsWith('\n') ? resultCode : `${resultCode}\n`;
+    return { spec, result, code: `${result.code}\n` };
+  };
+
+  const specs = [];
+  const seenSpecs = new Set();
+  const pushSpec = (spec) => {
+    const key = `${spec.seed}|${spec.escape}|${spec.noiseBytes}`;
+    if (seenSpecs.has(key)) return;
+    seenSpecs.add(key);
+    specs.push(spec);
+  };
+  pushSpec({ seed, escape, noiseBytes, kind: 'base', label: '基线配置' });
+  if (sizeSearchEnabled && engine === 'builtin') {
+    if (noiseBytes > 0) pushSpec({ seed, escape, noiseBytes: 0, kind: 'knob', label: '关闭噪音' });
+    if (escape !== 'none') pushSpec({ seed, escape: 'none', noiseBytes: 0, kind: 'knob', label: '关闭转义' });
+  }
+  if (sizeSearchEnabled) {
+    for (let i = 1; specs.length < maxRuns; i += 1) {
+      pushSpec({ seed: (seed + i) >>> 0, escape, noiseBytes, kind: 'seed', label: `换种子 +${i}` });
+    }
+  }
+
+  let rawBudget = harden?.targetBytes?.kind === 'bytes' ? harden.targetBytes.value : null;
+  let zipBudget = harden?.targetZipBytes?.kind === 'bytes' ? harden.targetZipBytes.value : null;
+  let percentPending = Boolean(
+    harden && (harden.targetBytes?.kind === 'percent' || harden.targetZipBytes?.kind === 'percent'),
+  );
+  let firstMetrics = null;
+  let chosen = null;
+  let minRaw = Infinity;
+  const attempts = [];
+
+  for (const spec of specs) {
+    if (attempts.length >= maxRuns) break;
+    // 已知最小 raw 都超预算时，换种子只会白白多跑；压缩体积的波动仅对 zip 有意义。
+    if (spec.kind === 'seed' && rawBudget && minRaw > rawBudget) break;
+    const candidate = render(spec);
+    const bytes = Buffer.byteLength(candidate.code);
+    const zip = zipFor(candidate.code);
+    candidate.bytes = bytes;
+    candidate.zip = zip;
+    candidate.zipBytes = zip.length;
+    attempts.push({
+      label: spec.label,
+      seed: spec.seed,
+      escape: spec.escape,
+      noiseBytes: spec.noiseBytes,
+      bytes,
+      zipBytes: zip.length,
+    });
+    minRaw = Math.min(minRaw, bytes);
+
+    if (!firstMetrics) {
+      firstMetrics = { rawBytes: bytes, zipBytes: zip.length };
+      if (percentPending) {
+        if (harden.targetBytes?.kind === 'percent') {
+          rawBudget = Math.max(1, Math.floor((bytes * harden.targetBytes.value) / 100));
+        }
+        if (harden.targetZipBytes?.kind === 'percent') {
+          zipBudget = Math.max(1, Math.floor((zip.length * harden.targetZipBytes.value) / 100));
+        }
+        percentPending = false;
+      }
+    }
+
+    const fits = (!rawBudget || bytes <= rawBudget) && (!zipBudget || zip.length <= zipBudget);
+    if (fits) {
+      chosen = candidate;
+      break;
+    }
+  }
+
+  if (!chosen) {
+    const last = attempts[attempts.length - 1] || { bytes: 0, zipBytes: 0 };
+    const reasons = [
+      rawBudget && last.bytes > rawBudget ? `raw ${last.bytes} > ${rawBudget}` : '',
+      zipBudget && last.zipBytes > zipBudget ? `zip ${last.zipBytes} > ${zipBudget}` : '',
+    ].filter(Boolean);
+    throw new Error(
+      `体积预算无法满足（${reasons.join('，')}）；已尝试 ${attempts.length}/${maxRuns} 次。` +
+        '可放宽 targetBytes/targetZipBytes、增大 maxRuns，或用 --target-size / --escape / --noise 手动取舍。',
+    );
+  }
+
+  const selection = {
+    configured: sizeSearchEnabled,
+    rawTarget: harden?.targetBytes || null,
+    zipTarget: harden?.targetZipBytes || null,
+    rawBudget,
+    zipBudget,
+    firstMetrics,
+    runs: attempts.length,
+    attempts,
+    chosen: {
+      seed: chosen.spec.seed,
+      escape: chosen.spec.escape,
+      noiseBytes: chosen.spec.noiseBytes,
+      label: chosen.spec.label,
+    },
+    legacySizeGate,
+    oneLine,
+  };
+
+  if (engine === 'javascript-obfuscator') {
+    const { result, keywordHide, resultCode, code, zip } = chosen;
     const totalBytes = Buffer.byteLength(result.code);
     const version = readPlainVersion(plainSource);
     if (!version) throw new Error('明文里找不到 `const CORE_VERSION = "..."`');
 
-    if (result.stats.preset === 'auto') {
-      if (result.code.includes('\n')) throw new Error('产物不是单行格式（内部错误）');
+    if (legacySizeGate && result.stats.preset === 'auto') {
+      if (oneLine && result.code.includes('\n')) throw new Error('产物不是单行格式（内部错误）');
       if (totalBytes < sizeRange.min || totalBytes > sizeRange.max) {
         throw new Error(`产物体积 ${totalBytes} 字节不在 ${sizeRange.min}..${sizeRange.max} 内`);
       }
@@ -267,7 +414,6 @@ export async function buildArtifacts({
     const exactTotal = [...visibility.exact].reduce((sum, [, count]) => sum + count, 0);
     const probe = await probeRuntime({ code, version });
 
-    const zip = createZip([{ name: WORKER_ENTRY, data: Buffer.from(code, 'utf8') }]);
     return {
       code,
       zip,
@@ -276,14 +422,17 @@ export async function buildArtifacts({
       engine,
       joPreset,
       dependency: result.version,
-      seed,
+      seed: chosen.spec.seed,
       probe,
+      selection,
+      selected: selection.chosen,
       stats: {
         engine,
         joPreset,
-        seed,
+        seed: chosen.spec.seed,
         dependency: result.version,
         joStats: result.stats,
+        oneLine,
         importFingerprint: importFingerprint(code),
         keywords: {
           hidden: keywordHide.hidden,
@@ -313,15 +462,16 @@ export async function buildArtifacts({
     };
   }
 
-  const result = obfuscate({ plainSource, prettySource, names, seed, mangle, escape, noiseBytes, targetBytes });
+  const result = chosen.result;
   if (!result.version) throw new Error('明文里找不到 `const CORE_VERSION = "..."`，无法交叉校验版本');
   if (!result.versionBinding) throw new Error('明文里找不到 CORE_VERSION 对应的绑定，无法校验产物版本常量');
 
-  const code = `${result.code}\n`;
+  const code = chosen.code;
   const totalBytes = Buffer.byteLength(result.code);
 
-  // 门槛 0：体积与单行格式（budget 模式下强制 37±5 KB 默认区间）
-  if (result.stats.escape === 'budget') {
+  // 门槛 0：体积与单行格式（默认 budget 模式强制 37±5 KB 默认区间；
+  // 配置了 harden 体积预算时由上面的体积搜索负责，不再套用默认区间）
+  if (legacySizeGate && result.stats.escape === 'budget') {
     if (result.code.includes('\n')) throw new Error('产物不是单行格式（内部错误）');
     if (totalBytes < sizeRange.min || totalBytes > sizeRange.max) {
       throw new Error(
@@ -402,18 +552,18 @@ export async function buildArtifacts({
   // 运行时契约探针（两种引擎共用；面板 55 项测试在 check.sh 里跑）
   const probe = await probeRuntime({ code, version: result.version });
 
-  const zip = createZip([{ name: WORKER_ENTRY, data: Buffer.from(code, 'utf8') }]);
-
   return {
     code,
-    zip,
+    zip: chosen.zip,
     version: result.version,
     versionBinding: result.versionBinding,
     engine,
     joPreset: null,
     dependency: null,
-    seed: result.stats.seed,
+    seed: chosen.spec.seed,
     probe,
+    selection,
+    selected: selection.chosen,
     importFingerprint: importFingerprint(result.core),
     keywords: {
       hidden: result.stats.keywordsHidden || 0,
@@ -427,7 +577,7 @@ export async function buildArtifacts({
       syntaxWords: KEYWORDS.auto.filter((word) => JS_SYNTAX_WORDS.has(word)),
     },
     stats: result.stats,
-    hashes: { worker: sha256(code), zip: sha256(zip) },
+    hashes: { worker: sha256(code), zip: sha256(chosen.zip) },
   };
 }
 
@@ -456,11 +606,12 @@ function writeAtomic(target, data, label) {
 
 function printStats(artifacts, seedSource) {
   const s = artifacts.stats;
+  const oneLine = artifacts.selection ? artifacts.selection.oneLine : true;
   const engineLabel =
     artifacts.engine === 'javascript-obfuscator'
       ? `javascript-obfuscator ${artifacts.dependency}（${artifacts.joPreset} 预设）`
       : `builtin（mangle=${s.mangle} escape=${s.escape}）`;
-  console.log(`   引擎：${engineLabel}，种子 ${artifacts.seed}（${seedSource}）`);
+  console.log(`   引擎：${engineLabel}，种子 ${artifacts.seed}（${seedSource}），${oneLine ? '单行' : '多行'}`);
   console.log(`   内核版本：${artifacts.version}${artifacts.versionBinding ? `（产物常量名 ${artifacts.versionBinding}）` : '（版本名由引擎随机化，运行时探针已核对）'}`);
   if (artifacts.engine === 'builtin') {
     console.log(`   反向映射：${s.mapped} 条；重命名 ${s.renamed} 个绑定；转义 ${s.escapedStrings} 个字符串（跳过 ${s.skippedStrings}）`);
@@ -472,6 +623,22 @@ function printStats(artifacts, seedSource) {
       : `${jo.preset} 预设（不做体积控制）`;
     console.log(`   产物 ${humanBytes(s.totalBytes)}；${tuning}`);
     console.log(`   运行时探针：coreVersion ${artifacts.probe.coreVersion}，配置字段 ${artifacts.probe.configKeys} 个，region=${artifacts.probe.region}`);
+  }
+  if (artifacts.selection && artifacts.selection.configured) {
+    const sel = artifacts.selection;
+    const label = (spec, budget) => {
+      if (!budget) return '不限制';
+      return spec && spec.kind === 'percent'
+        ? `${spec.value}%（${humanBytes(budget)}）`
+        : humanBytes(budget);
+    };
+    const knob = artifacts.engine === 'builtin'
+      ? `，选中 escape=${sel.chosen.escape} / noise=${sel.chosen.noiseBytes}`
+      : '';
+    console.log(
+      `   体积预算：raw ≤ ${label(sel.rawTarget, sel.rawBudget)}，zip ≤ ${label(sel.zipTarget, sel.zipBudget)}；` +
+        `搜索 ${sel.runs} 次${sel.runs > 1 ? `（${sel.chosen.label}${knob}）` : ''}`,
+    );
   }
   console.log(`   _worker.js：sha256 ${artifacts.hashes.worker.slice(0, 16)}…；pages.zip：${humanBytes(artifacts.zip.length)}，sha256 ${artifacts.hashes.zip.slice(0, 16)}…`);
   if (artifacts.importFingerprint) {
@@ -564,6 +731,12 @@ async function main() {
   const { mangle, escape, noiseBytes, targetBytes } = resolveObfuscationOptions({ opts, env: process.env, record });
   const sizeRange = resolveSizeRange({ opts, env: process.env, record });
   const { engine, joPreset } = resolveEngine({ opts, env: process.env, record });
+  const harden = loadHardenParams({ opts, flags, env: process.env });
+  // 配置文件 > 种子记录 > 默认值：配置没写 oneLine 时，沿用它上次构建的格式。
+  if (!harden.provided.oneLine && record && typeof record.oneLine === 'boolean') {
+    harden.oneLine = record.oneLine;
+  }
+  const hardenConfigured = Boolean(harden.provided.targetBytes || harden.provided.targetZipBytes);
 
   const writeMode = !check && !dryRun;
   const reuseSeedFlag =
@@ -588,6 +761,10 @@ async function main() {
     `混淆工作流：${path.relative(ROOT, plainPath).replace(/\\/g, '/')} → ` +
       `${path.relative(ROOT, outPath).replace(/\\/g, '/')} + ${path.relative(ROOT, zipPath).replace(/\\/g, '/')}`,
   );
+  if (harden.configExists || hardenConfigured || harden.provided.oneLine) {
+    const rel = path.relative(ROOT, harden.configPath).replace(/\\/g, '/');
+    console.log(`   配置文件：${rel}${harden.configExists ? '' : '（不存在，使用默认值）'}`);
+  }
   const artifacts = await buildArtifacts({
     plainSource,
     prettySource,
@@ -600,9 +777,14 @@ async function main() {
     noiseBytes,
     targetBytes,
     sizeRange,
+    harden,
   });
-  printStats(artifacts, seedInfo.source);
-  if (engine === 'builtin' && artifacts.stats.escape === 'budget') {
+  const selected = artifacts.selected || { seed: seedInfo.seed, escape, noiseBytes };
+  const seedSource = selected.seed === seedInfo.seed
+    ? seedInfo.source
+    : `${seedInfo.source}；体积搜索改用种子 ${selected.seed}`;
+  printStats(artifacts, seedSource);
+  if (engine === 'builtin' && artifacts.selection && artifacts.selection.legacySizeGate && artifacts.stats.escape === 'budget') {
     console.log(
       `   格式/体积：单行，${Buffer.byteLength(artifacts.code)} 字节（目标 ${targetBytes}，允许 ${sizeRange.min}..${sizeRange.max}）`,
     );
@@ -658,28 +840,35 @@ async function main() {
 
   const written = [];
   if (!workerOk) {
-    written.push(writeAtomic(outPath, artifacts.code, `${humanBytes(Buffer.byteLength(artifacts.code))}，单行`));
+    written.push(
+      writeAtomic(
+        outPath,
+        artifacts.code,
+        `${humanBytes(Buffer.byteLength(artifacts.code))}，${harden.oneLine ? '单行' : '多行'}`,
+      ),
+    );
   }
   if (!zipOk) {
     written.push(writeAtomic(zipPath, artifacts.zip, `${humanBytes(artifacts.zip.length)}，根目录只有 ${WORKER_ENTRY}`));
   }
 
-  // 写模式把「引擎 + 预设 + 种子」落盘，供 CI 的 --check 复现。
+  // 写模式把「引擎 + 预设 + 种子 + 实际选中的混淆参数」落盘，供 CI 的 --check 复现。
   const nextRecord = {
-    seed: seedInfo.seed,
+    seed: selected.seed,
     engine,
     joPreset,
     mangle,
-    escape,
-    noiseBytes,
+    escape: selected.escape,
+    noiseBytes: selected.noiseBytes,
     targetBytes,
     sizeMin: sizeRange.min,
     sizeMax: sizeRange.max,
+    oneLine: harden.oneLine,
   };
   const sameRecord = record && Object.entries(nextRecord).every(([key, value]) => record[key] === value);
   if (!sameRecord) {
     saveSeedRecord(nextRecord, SEED_FILE);
-    console.log(`📝 已更新 ${path.relative(ROOT, SEED_FILE).replace(/\\/g, '/')}：engine=${engine}${engine === 'javascript-obfuscator' ? ` preset=${joPreset}` : ''} seed=${seedInfo.seed}`);
+    console.log(`📝 已更新 ${path.relative(ROOT, SEED_FILE).replace(/\\/g, '/')}：engine=${engine}${engine === 'javascript-obfuscator' ? ` preset=${joPreset}` : ''} seed=${selected.seed}`);
   }
 
   if (written.length === 0) {

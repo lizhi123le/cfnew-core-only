@@ -13,14 +13,18 @@
  *   9. javascript-obfuscator 可选引擎：可重现、import 复原、运行时探针通过
  *  10. 体积预算与单行格式：默认 budget 模式落在 37±5 KB、产物体内无换行
  *  11. 关键词：auto 硬性隐藏/检查、manual 期望隐藏、字符串值不变
+ *  12. harden.config.json：体积写法解析、CLI/环境变量/配置文件优先级
+ *  13. 单行开关与体积搜索：oneLine=false 多行、预算搜索选参数、不可达预算失败
  */
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { parse } from '@babel/parser';
 import _traverse from '@babel/traverse';
 import { buildReverseMap, obfuscate, mulberry32, assertInertNoise, deriveSeed, normalizeSeed, DEFAULT_PATHS } from './obfuscate.mjs';
 import { obfuscateWithJavaScriptObfuscator } from './engine-javascript-obfuscator.mjs';
-import { probeRuntime } from './build-kernel.mjs';
+import { buildArtifacts, probeRuntime } from './build-kernel.mjs';
+import { parseSizeSpec, formatSizeSpec, loadHardenParams } from './harden-config.mjs';
 import { canonicalize } from './verify-alpha.mjs';
 import { createZip, readZipEntries } from './pages-zip.mjs';
 import {
@@ -253,6 +257,139 @@ ok(
 const visibility = scanKeywordVisibility(budget.code, keywordLists.auto);
 ok((visibility.exact.get('port') || 0) > 0, '结构扫描能如实报告 port/region 等整词属性名');
 ok((visibility.exact.get('region') || 0) > 0, '结构扫描能如实报告 region 等整词属性名');
+
+console.log('== 12. harden.config.json 参数解析 ==');
+const sizeCases = [
+  ['320000', { kind: 'bytes', value: 320000 }],
+  ['320k', { kind: 'bytes', value: 327680 }],
+  ['1m', { kind: 'bytes', value: 1048576 }],
+  ['75%', { kind: 'percent', value: 75 }],
+  ['0', null],
+  ['0%', null],
+  [0, null],
+];
+for (const [input, expected] of sizeCases) {
+  ok(
+    JSON.stringify(parseSizeSpec(input)) === JSON.stringify(expected),
+    `体积写法 ${JSON.stringify(input)} → ${JSON.stringify(expected)}`,
+  );
+}
+let invalidSizeThrew = false;
+try {
+  parseSizeSpec('abc');
+} catch {
+  invalidSizeThrew = true;
+}
+ok(invalidSizeThrew, '非法体积写法会报错');
+ok(formatSizeSpec({ kind: 'percent', value: 75 }) === '75%', '百分比格式化');
+ok(formatSizeSpec({ kind: 'bytes', value: 327680 }) === '327680', '绝对字节格式化');
+ok(formatSizeSpec(null) === '', '0/缺省格式化为空');
+
+const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cfnew-harden-'));
+const tmpConfig = path.join(tmpDir, 'harden.config.json');
+fs.writeFileSync(
+  tmpConfig,
+  JSON.stringify({ targetBytes: '320k', targetZipBytes: '1m', maxRuns: 5, oneLine: false }),
+);
+const cfgParams = loadHardenParams({ opts: new Map([['config', tmpConfig]]), flags: new Set(), env: {} });
+ok(
+  cfgParams.targetBytes.value === 327680 && cfgParams.targetZipBytes.value === 1048576,
+  '配置文件提供体积目标',
+);
+ok(cfgParams.maxRuns === 5 && cfgParams.oneLine === false, '配置文件提供 maxRuns / oneLine');
+ok(cfgParams.provided.oneLine === true, '配置文件里的 oneLine 被视为显式提供');
+const envParams = loadHardenParams({
+  opts: new Map([['config', tmpConfig]]),
+  flags: new Set(),
+  env: { CFNEW_TARGET_BYTES: '75%', CFNEW_MAX_RUNS: '9', CFNEW_ONE_LINE: '1' },
+});
+ok(
+  envParams.targetBytes.kind === 'percent' && envParams.targetBytes.value === 75,
+  '环境变量覆盖配置文件（百分比）',
+);
+ok(envParams.maxRuns === 9 && envParams.oneLine === true, '环境变量覆盖 maxRuns / oneLine');
+const cliParams = loadHardenParams({
+  opts: new Map([
+    ['config', tmpConfig],
+    ['target-bytes', '100k'],
+    ['target-zip', '0'],
+    ['one-line', 'false'],
+  ]),
+  flags: new Set(),
+  env: { CFNEW_TARGET_BYTES: '75%' },
+});
+ok(cliParams.targetBytes.value === 102400, 'CLI 优先于环境变量与配置文件');
+ok(
+  cliParams.targetZipBytes === null && cliParams.provided.targetZipBytes === true,
+  '显式 0 = 关闭该限制（仍算已提供）',
+);
+ok(cliParams.oneLine === false, 'CLI --one-line=false 生效');
+fs.rmSync(tmpDir, { recursive: true, force: true });
+
+console.log('== 13. 单行开关与体积预算搜索 ==');
+const multiline = obfuscate({
+  plainSource,
+  prettySource,
+  names,
+  seed,
+  mangle: 'all',
+  escape: 'budget',
+  targetBytes: 39500,
+  noiseBytes: 512,
+  oneLine: false,
+});
+ok(multiline.code.includes('\n'), 'oneLine=false 产物包含换行');
+ok(canonicalize(multiline.core) === canonicalize(plainSource), '多行混淆核仍与明文 alpha 等价');
+ok(JSON.stringify(stringValues(multiline.core)) === JSON.stringify(plainStrings), '多行产物字符串值逐个相同');
+
+const hardenFor = (targetBytes, maxRuns = 6) => ({
+  targetBytes,
+  targetZipBytes: null,
+  maxRuns,
+  oneLine: true,
+  provided: { targetBytes: true, targetZipBytes: false, maxRuns: true, oneLine: true },
+});
+const baseBuild = {
+  plainSource,
+  prettySource,
+  names,
+  seed,
+  engine: 'builtin',
+  joPreset: 'auto',
+  mangle: 'all',
+  escape: 'budget',
+  noiseBytes: 4096,
+  targetBytes: 39500,
+  sizeRange: { min: 32000, max: 42000 },
+};
+const tight = await buildArtifacts({ ...baseBuild, harden: hardenFor({ kind: 'bytes', value: 39400 }, 4) });
+ok(Buffer.byteLength(tight.code) <= 39400, `预算搜索把产物压到 ${Buffer.byteLength(tight.code)} ≤ 39400 字节`);
+ok(
+  tight.selection.configured && tight.selection.runs >= 1 && tight.selection.runs <= 4,
+  `搜索次数 ${tight.selection.runs} 不超过 maxRuns=4`,
+);
+const legacy = await buildArtifacts({ ...baseBuild }); // 不传 harden：保持旧的 32..42 KB 区间
+ok(
+  !legacy.selection.configured && legacy.selection.legacySizeGate,
+  '未配置 harden 时仍走旧的体积区间检查',
+);
+ok(
+  Buffer.byteLength(legacy.code) >= 32000 && Buffer.byteLength(legacy.code) <= 42000,
+  `未配置 harden 时产物 ${Buffer.byteLength(legacy.code)} 字节仍在 32..42 KB`,
+);
+const pct = await buildArtifacts({ ...baseBuild, harden: hardenFor({ kind: 'percent', value: 99.9 }) });
+ok(
+  Buffer.byteLength(pct.code) <= Math.floor((pct.selection.firstMetrics.rawBytes * 99.9) / 100),
+  '百分比预算按首次混淆产物解析并达标',
+);
+let budgetThrew = false;
+try {
+  // 明文混淆核本身约 39,242 B，低于它的预算不可能达成。
+  await buildArtifacts({ ...baseBuild, harden: hardenFor({ kind: 'bytes', value: 38000 }, 2) });
+} catch (error) {
+  budgetThrew = /体积预算无法满足/.test(error.message);
+}
+ok(budgetThrew, '不可达预算会失败并说明原因');
 
 console.log('');
 if (failures) {

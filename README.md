@@ -132,6 +132,12 @@ edge.example.com:443#手填域名
 用到的种子会写进 `tools/obfuscate.seed.json`，`--check` 据此逐字节复现，CI 仍然可校验。
 想要可复现构建时用 `--reuse-seed` 或 `--seed N`。
 
+体积上限与单行格式是可选的仓库根目录 `harden.config.json`：`targetBytes` / `targetZipBytes` 是
+`_worker.js` / `pages.zip` 的上限预算（支持 `522k`、`1m`、`75%`，`0` 关闭），`maxRuns` 限制超预算时的
+搜索次数，`oneLine` 控制单行/多行。优先级 CLI > 环境变量 > 配置文件 > 默认值，详见
+[tools/README.md](./tools/README.md#体积预算与-hardenconfigjson)。当前配置的 522k / 232k 都远大于本内核
+约 39 KB 的产物，所以默认构建不会被改变；混淆核本身约 39,242 B，低于它的预算无法达成。
+
 ```powershell
 cd tools
 npm install
@@ -142,6 +148,8 @@ node build-kernel.mjs --dry-run    # 只看差异，不写文件
 node build-kernel.mjs --seed 12345 # 显式指定种子（会记录）
 node build-kernel.mjs --target-size=38000            # 体积目标可调（默认 39500）
 node build-kernel.mjs --escape=partial --noise=2048  # 或显式控制转义/噪音（不保证体积区间）
+node build-kernel.mjs --target-bytes=38k --target-zip=20k --max-runs=20  # 体积上限预算
+node build-kernel.mjs --one-line=false               # 多行输出
 node build-kernel.mjs --engine=javascript-obfuscator --jo-preset=auto   # 改用官方混淆器参数（auto 按体积预算调参）
 bash check.sh                      # 五道硬门槛：align + 混淆自测 + 产物可重现 + 面板 55 项（明文/混淆各一遍）
 ```

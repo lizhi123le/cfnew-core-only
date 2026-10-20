@@ -148,7 +148,7 @@ export function restoreModuleSpecifiers(code) {
  * 对象键写成 `{'prop': v}`。这里在 AST 层还原成点号/标识符键（语义完全相同），
  * 再用压缩生成器重排 —— 体积能小 5 KB 左右，且顺带把被转义的模块说明符恢复成原文。
  */
-export function normalizeJoOutput(code) {
+export function normalizeJoOutput(code, oneLine = true) {
   const ast = parse(code, { sourceType: 'module' });
   traverse(ast, {
     ObjectProperty(p) {
@@ -167,7 +167,12 @@ export function normalizeJoOutput(code) {
       node.property = { type: 'Identifier', name: node.property.value };
     },
   });
-  return generate(ast, { comments: false, compact: true, minified: true, jsescOption: { minimal: true } }).code;
+  return generate(ast, {
+    comments: false,
+    compact: oneLine,
+    minified: oneLine,
+    jsescOption: { minimal: true },
+  }).code;
 }
 
 /**
@@ -175,12 +180,17 @@ export function normalizeJoOutput(code) {
  * 这一步在 AST 上复用本仓库的「按作用域链 + 引用频率」重命名，把体积拉回 37.8 KB 量级；
  * JO 的结构性混淆（simplify / stringArray 等）保持不变。
  */
-export function optimizeNames(code, seed) {
+export function optimizeNames(code, seed, oneLine = true) {
   const ast = parse(code, { sourceType: 'module' });
   const rng = mulberry32((Number(seed) >>> 0) ^ 0x9e3779b9);
   const bindings = scopeBindings(ast).filter((binding) => binding.identifier);
   renameScoped({ ast, bindings, rng });
-  return generate(ast, { comments: false, compact: true, minified: true, jsescOption: { minimal: true } }).code;
+  return generate(ast, {
+    comments: false,
+    compact: oneLine,
+    minified: oneLine,
+    jsescOption: { minimal: true },
+  }).code;
 }
 
 function runJo({ source, options }) {
@@ -207,7 +217,8 @@ function runJo({ source, options }) {
  * @param {number} options.seed
  * @param {'auto'|'light'|'balanced'} [options.preset]
  * @param {number} [options.targetBytes]
- * @param {{min:number,max:number}} [options.sizeRange]
+ * @param {{min:number,max:number}|null} [options.sizeRange]  null = 不检查体积区间
+ * @param {boolean} [options.oneLine]  产物是否压成一行
  * @param {object} [options.overrides]
  * @returns {{ code: string, options: object, version: string, stats: object }}
  */
@@ -217,6 +228,7 @@ export function obfuscateWithJavaScriptObfuscator({
   preset = 'auto',
   targetBytes = 39500,
   sizeRange = { min: 32000, max: 42000 },
+  oneLine = true,
   overrides = {},
   configPath,
 }) {
@@ -229,6 +241,7 @@ export function obfuscateWithJavaScriptObfuscator({
     ...config,
     ...overrides,
     seed: Number(seed) >>> 0,
+    compact: oneLine,
   });
 
   const dependency = joDependencyVersion();
@@ -236,20 +249,21 @@ export function obfuscateWithJavaScriptObfuscator({
   if (preset !== 'auto') {
     const raw = runJo({ source, options: baseOptions });
     // balanced 的字符串数组经过 AST 重排仍保留编码值，体积更小；light 的 unicode 转义必须保留
-    const code = preset === 'balanced' ? normalizeJoOutput(raw) : restoreModuleSpecifiers(raw);
+    const code = preset === 'balanced' ? normalizeJoOutput(raw, oneLine) : restoreModuleSpecifiers(raw);
     return {
       code,
       options: baseOptions,
       version: dependency,
-      stats: { preset, bytes: Buffer.byteLength(code), threshold: null, runs: 1 },
+      stats: { preset, bytes: Buffer.byteLength(code), threshold: null, runs: 1, oneLine },
     };
   }
 
   // auto：JO 混淆 → 属性语法还原 → 按引用频率重命名 → 逐步加 stringArray 强度填到目标
-  const buildCandidate = (options) => optimizeNames(normalizeJoOutput(runJo({ source, options })), seed);
+  const buildCandidate = (options) =>
+    optimizeNames(normalizeJoOutput(runJo({ source, options }), oneLine), seed, oneLine);
   const skeleton = buildCandidate(baseOptions);
   let best = { code: skeleton, threshold: null, bytes: Buffer.byteLength(skeleton), runs: 1 };
-  if (best.bytes > sizeRange.max) {
+  if (sizeRange && best.bytes > sizeRange.max) {
     throw new Error(
       `javascript-obfuscator 最小产物 ${best.bytes} 字节已超过 ${sizeRange.max}（37±5 KB）。` +
         '可换回 builtin 引擎，或放宽 --size-max。',
@@ -274,7 +288,7 @@ export function obfuscateWithJavaScriptObfuscator({
   }
 
   const finalBytes = Buffer.byteLength(best.code);
-  if (finalBytes < sizeRange.min || finalBytes > sizeRange.max) {
+  if (sizeRange && (finalBytes < sizeRange.min || finalBytes > sizeRange.max)) {
     throw new Error(`javascript-obfuscator 产物 ${finalBytes} 字节不在 ${sizeRange.min}..${sizeRange.max} 内`);
   }
 
@@ -282,6 +296,13 @@ export function obfuscateWithJavaScriptObfuscator({
     code: best.code,
     options: baseOptions,
     version: dependency,
-    stats: { preset: 'auto', bytes: finalBytes, threshold: best.threshold, runs: best.runs, skeletonBytes: Buffer.byteLength(skeleton) },
+    stats: {
+      preset: 'auto',
+      bytes: finalBytes,
+      threshold: best.threshold,
+      runs: best.runs,
+      skeletonBytes: Buffer.byteLength(skeleton),
+      oneLine,
+    },
   };
 }
