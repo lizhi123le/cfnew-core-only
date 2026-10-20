@@ -804,10 +804,16 @@ export function obfuscate({
     jsescOption: { minimal: true },
   }).code;
 
-  // 关键词隐藏先做：只转义命中的字符，字符串值不变；随后体积预算在剩余空间里分配。
-  const keywordResult = hideKeywordsInCode(core, [...KEYWORDS.auto, ...KEYWORDS.manual], {
+  // 关键词隐藏先做：字符串/模板只转义命中的字符，值不变；标识符（含属性名）只转义命中的
+  // 单个字符（`port` → `p\u006frt`），解码后仍是同一个名字。随后体积预算在剩余空间里分配。
+  const ALL_WORDS = [...KEYWORDS.auto, ...KEYWORDS.manual];
+  const keywordResult = hideKeywordsInCode(core, ALL_WORDS, {
     includeModuleSpecifiers: true,
     includeImportIdentifiers: true,
+    includeIdentifiers: true,
+    // 额外 700 字节预算：随机挑一部分标识符多转义 1 个字符（1–2 个随机），形态也随机。
+    // 有上界，保证不会把产物体积撑破 harden.config.json 的上限。
+    identifierExtraBudget: 700,
     randomize: true,
     rng,
   });
@@ -820,7 +826,17 @@ export function obfuscate({
   const coreTaken = collectIdentifierNames(parseModule(core));
   for (const name of taken) coreTaken.add(name);
   for (const word of RESERVED) coreTaken.add(word);
-  const noise = buildNoise({ rng, maxBytes: escapedInfo.noiseBudget, taken: coreTaken, oneLine });
+  const noiseRaw = buildNoise({ rng, maxBytes: escapedInfo.noiseBudget, taken: coreTaken, oneLine });
+  // 噪音里的随机短名/随机单词也可能凑巧拼出词表词；同样做一次转义，保证最终产物整体干净。
+  let noise = noiseRaw;
+  if (noiseRaw) {
+    const noiseKeywords = hideKeywordsInCode(noiseRaw, ALL_WORDS, {
+      includeIdentifiers: true,
+      includeModuleSpecifiers: true,
+      rng,
+    });
+    if (noiseKeywords.hidden > 0) noise = noiseKeywords.code;
+  }
   assertInertNoise(noise);
 
   const versionBinding = versionBindingRef

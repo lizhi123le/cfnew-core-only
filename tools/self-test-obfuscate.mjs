@@ -28,6 +28,7 @@ import { parseSizeSpec, formatSizeSpec, loadHardenParams } from './harden-config
 import { canonicalize } from './verify-alpha.mjs';
 import { createZip, readZipEntries } from './pages-zip.mjs';
 import {
+  findForbiddenKeywords,
   findKeywordLeaks,
   findKeywordLeaksInModuleSpecifiers,
   scanKeywordVisibility,
@@ -186,7 +187,7 @@ ok(IMPORT_PATTERN.test(joBalanced.code), 'balanced 预设同样保留 import 原
 ok(jo.options.renameProperties === false, '强制 renameProperties=false（保护面板 JSON 字段名）');
 
 console.log('== 10. 体积预算与单行格式 ==');
-const budgetOpts = { plainSource, prettySource, names, seed, mangle: 'all', escape: 'budget', targetBytes: 39500, noiseBytes: 4096 };
+const budgetOpts = { plainSource, prettySource, names, seed, mangle: 'all', escape: 'budget', targetBytes: 41900, noiseBytes: 4096 };
 const budget = obfuscate(budgetOpts);
 const budgetBytes = Buffer.byteLength(budget.code);
 ok(!budget.code.includes('\n'), '产物体内没有换行（保持原有单行格式）');
@@ -211,6 +212,8 @@ let probeValue = null;
 traverse(parsedProbe, { StringLiteral(p) { probeValue = p.node.value; } });
 ok(probeValue === 'cfnew vless config', '隐藏没有改变字符串值');
 ok(findKeywordLeaks('const a = "cfnew";', ['cfnew']).length === 1, '检查能发现明文关键词');
+ok(findForbiddenKeywords('const o={port:1};', ['port']).length > 0, '硬性门禁能发现属性名里的明文');
+ok(findForbiddenKeywords('typeof x;export{}', ['type', 'port']).length === 0, '硬性门禁放行 JS 关键字内部的子串');
 ok(findKeywordLeaks(base.core, keywordLists.auto).length === 0, 'escape=all 产物无硬性泄露');
 ok(findKeywordLeaks(budget.core, keywordLists.auto).length === 0, 'budget 产物无硬性泄露');
 ok(findKeywordLeaks(budget.code, keywordLists.auto).length === 0, '带噪音的最终产物无硬性泄露');
@@ -255,8 +258,43 @@ ok(
   '随机转义后还原值相同'
 );
 const visibility = scanKeywordVisibility(budget.code, keywordLists.auto);
-ok((visibility.exact.get('port') || 0) > 0, '结构扫描能如实报告 port/region 等整词属性名');
-ok((visibility.exact.get('region') || 0) > 0, '结构扫描能如实报告 region 等整词属性名');
+ok((visibility.exact.get('port') || 0) === 0, '结构扫描：port 整词属性名已全部转义（0 处）');
+ok((visibility.exact.get('region') || 0) === 0, '结构扫描：region 整词属性名已全部转义（0 处）');
+ok([...visibility.structural.values()].reduce((sum, n) => sum + n, 0) === 0, '结构扫描：标识符/属性名里没有残留');
+ok([...visibility.keyword.values()].reduce((sum, n) => sum + n, 0) > 0, '语法关键字内的子串单独归类（import/typeof）');
+ok(findForbiddenKeywords(budget.code, keywordLists.auto).length === 0, '最终产物通过硬性词表门禁');
+ok(findForbiddenKeywords(base.code, keywordLists.auto).length === 0, 'escape=all 产物通过硬性词表门禁');
+
+// 标识符最小转义：只改一个字符，解码后名字与属性键完全不变。
+const identSrc = 'const port=1;const region="x";const o={port,region};function f(port){return port+o.region;}';
+const identHidden = hideKeywordsInCode(identSrc, ['port', 'region'], { includeIdentifiers: true });
+ok(!/port|region/i.test(identHidden.code), '标识符/属性名里的 port、region 已不可见');
+const identBack = parse(identHidden.code, { sourceType: 'module' });
+const backNames = [];
+traverse(identBack, {
+  Identifier(p) { backNames.push(p.node.name); },
+});
+ok(backNames.includes('port') && backNames.includes('region'), '转义后标识符解码仍是 port / region（语义不变）');
+ok(identHidden.code.length - identSrc.length < 60, `最小转义只增加 ${identHidden.code.length - identSrc.length} 字节`);
+
+// 随机加码：同一份源码，不同种子下转义的位置/形态不同，但解码后的名字不变。
+const manySrc = 'const port=1,region=2,ech=3,alpn=4,hostname="h",address="a",connect=5,toString=6;';
+const manyWords = ['port', 'region', 'ech', 'alpn', 'ost', 'dres', 'onnec'];
+const manyA = hideKeywordsInCode(manySrc, manyWords, {
+  includeIdentifiers: true,
+  identifierExtraBudget: 200,
+  rng: mulberry32(0x12345678),
+});
+const manyB = hideKeywordsInCode(manySrc, manyWords, {
+  includeIdentifiers: true,
+  identifierExtraBudget: 200,
+  rng: mulberry32(0x87654321),
+});
+ok(manyA.code !== manyB.code, '不同种子下标识符转义位置/形态不同');
+ok(manyA.chars > manyA.hidden, `预算内随机多转了 ${manyA.chars - manyA.hidden} 个字符（1–2 个随机）`);
+const manyBack = [];
+traverse(parse(manyA.code, { sourceType: 'module' }), { Identifier(p) { manyBack.push(p.node.name); } });
+ok(manyBack.includes('port') && manyBack.includes('region') && manyBack.includes('hostname'), '随机转义后名字仍全部还原');
 
 console.log('== 12. harden.config.json 参数解析 ==');
 const sizeCases = [
@@ -362,8 +400,8 @@ const baseBuild = {
   targetBytes: 39500,
   sizeRange: { min: 32000, max: 42000 },
 };
-const tight = await buildArtifacts({ ...baseBuild, harden: hardenFor({ kind: 'bytes', value: 39400 }, 4) });
-ok(Buffer.byteLength(tight.code) <= 39400, `预算搜索把产物压到 ${Buffer.byteLength(tight.code)} ≤ 39400 字节`);
+const tight = await buildArtifacts({ ...baseBuild, harden: hardenFor({ kind: 'bytes', value: 41700 }, 4) });
+ok(Buffer.byteLength(tight.code) <= 41700, `预算搜索把产物压到 ${Buffer.byteLength(tight.code)} ≤ 41700 字节`);
 ok(
   tight.selection.configured && tight.selection.runs >= 1 && tight.selection.runs <= 4,
   `搜索次数 ${tight.selection.runs} 不超过 maxRuns=4`,
@@ -377,15 +415,15 @@ ok(
   Buffer.byteLength(legacy.code) >= 32000 && Buffer.byteLength(legacy.code) <= 42000,
   `未配置 harden 时产物 ${Buffer.byteLength(legacy.code)} 字节仍在 32..42 KB`,
 );
-const pct = await buildArtifacts({ ...baseBuild, harden: hardenFor({ kind: 'percent', value: 99.9 }) });
+const pct = await buildArtifacts({ ...baseBuild, harden: hardenFor({ kind: 'percent', value: 100 }) });
 ok(
-  Buffer.byteLength(pct.code) <= Math.floor((pct.selection.firstMetrics.rawBytes * 99.9) / 100),
+  Buffer.byteLength(pct.code) <= Math.floor((pct.selection.firstMetrics.rawBytes * 100) / 100),
   '百分比预算按首次混淆产物解析并达标',
 );
 let budgetThrew = false;
 try {
-  // 明文混淆核本身约 39,242 B，低于它的预算不可能达成。
-  await buildArtifacts({ ...baseBuild, harden: hardenFor({ kind: 'bytes', value: 38000 }, 2) });
+  // 硬性词表转义后混淆核约 40.4 KB，低于它的预算不可能达成。
+  await buildArtifacts({ ...baseBuild, harden: hardenFor({ kind: 'bytes', value: 39000 }, 2) });
 } catch (error) {
   budgetThrew = /体积预算无法满足/.test(error.message);
 }

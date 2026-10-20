@@ -105,7 +105,7 @@ _worker.pretty.js ──deobfuscate──▶ plain/_worker.js ──obfuscate─
 
 | 引擎 / 预设 | 产物大小 | 字符串处理 | 运行时开销 | 能证明什么 |
 | --- | --- | --- | --- | --- |
-| `builtin`（默认） | 39,432 B（单行，37±5 KB） | 随机 `\xHH` / `\uHHHH` 转义 | 无 | alpha 等价 + 字符串值一致 + 运行时探针 |
+| `builtin`（默认） | 约 41,432 B（单行，37±5 KB） | 随机 `\xHH` / `\uHHHH` 转义 | 无 | alpha 等价 + 字符串值一致 + 运行时探针 |
 | `javascript-obfuscator` `auto`（默认） | 约 39.3 KB（单行，37±5 KB） | `stringArrayThreshold` 自动搜索（当前 0.03） | 少量字符串数组解码 | 运行时探针 + 面板 55 项 |
 | `javascript-obfuscator` `light` | 80,117 B | 全部 `\uXXXX` 转义，无字符串数组 | 无解码 | 运行时探针 + 面板 55 项 |
 | `javascript-obfuscator` `balanced` | 46,014 B | 字符串数组 + base64 | 每次字符串访问解码 | 运行时探针 + 面板 55 项 |
@@ -155,30 +155,41 @@ node build-kernel.mjs --engine=builtin            # 切回默认
 
 词表放在仓库根目录（每行一个，空行与 `#` 注释忽略）：
 
-- `sensitive_words_auto.txt`：**指定隐藏**。字符串/模板/模块说明符里命中即强制转义；构建结束时再检查一次，
-  只要还有明文残留就直接失败。
+- `sensitive_words_auto.txt`：**硬性词表**。字符串/模板/模块说明符/标识符（含属性名）里命中即强制转义；
+  构建写文件前对**最终产物原文**再做一次门禁扫描，除 JS 语法关键字内部的子串外，任何位置还有明文就失败。
 - `sensitive_words_manual.txt`：**期望隐藏**。同样优先转义；仍有残留只打印 WARN，不阻塞构建。
 
-实现见 `tools/keywords.mjs`：只转义命中的字符（`type` → `\x74ype`），字符串值不变，
-比整串转义省体积；`build-kernel.mjs` 在写文件前调用 `findKeywordLeaks` 复查。
+实现见 `tools/keywords.mjs`。两类位置用不同的最小转义，值和名字都不变：
 
-范围：字符串字面量、模板静态片段、import/export 模块说明符、import 绑定名。
+- 字符串 / 模板静态片段 / 模块说明符：转义命中的字符，写法随机选 `\xHH` / `\uHHHH` / `\u{HH}`，
+  十六进制大小写也随机（`type` → `\x74ype` 或 `\u0074ype`）；
+- 标识符 / 属性名（`port`、`region`、`ech`、`alpn`、`match`、`config`…）：基础是每个命中词
+  **一个**字符做 Unicode 转义（`port` → `p\u006frt`），再用 700 字节预算随机给约一半标识符
+  **加转义第 2 个**字符（所以每个词是随机 1–2 个）；转义形态随机选 `\uXXXX` / `\u{HH}` /
+  带随机前导零的 `\u{0000HH}`，十六进制大小写也随机。ECMAScript 解码后仍是同一个标识符，
+  属性键、JSON 字段名、作用域绑定都不变。随机加码有确定字节上界，不会把产物体积撑破预算。
+
+> 注：JS 只有十六进制转义（`\xHH` / `\uHHHH` / `\u{...}`），没有二进制字面量，所以“二进制转换”
+> 无法直接写进源码；这里用「前导零位数 + 十六进制大小写 + 三种转义形态」来提供等价的形态随机性。
+
+范围：字符串字面量、模板静态片段、import/export 模块说明符、import 绑定名、所有标识符/属性名、噪音块。
 发布产物会把 `cloudflare:sockets` 的说明符和 `connect` 绑定名**按种子随机转义**：
 说明符里每个字符随机用 `\xHH` / `\uHHHH` / `\u{HH}`（十六进制大小写也随机），
 绑定名随机用 `\uXXXX` / `\u{XX}`；不同种子形态不同、同一 seed 可复现。
 构建日志会打印 `import 形态指纹`：每次新种子都会变；`--check` / `--reuse-seed` 复用种子时保持不变。面板测试用正则打桩，因此 `check.sh` 先用
 `tools/prepare-test-core.mjs` 生成「只还原这些语法书写形式」的等价副本，再跑测试；
-`build-kernel` 的运行时探针也会自动还原。`import` / `from` / `as` 是 JS 语法关键字，
-无法转义，构建日志会固定提示。
+`build-kernel` 的运行时探针也会自动还原。
+
+唯一无法消除的残留：`import` / `export` / `typeof` 这类 JS **语法关键字**（ECMAScript 禁止用转义
+拼出保留字），所以 `port`、`type` 会作为子串留在关键字里。门禁用词法器把每个出现位置分类，
+只放行被判定为 `keyword` token 的命中；字符串、标识符、属性名、注释、正则里的命中一律构建失败。
 
 构建日志怎么读：
 
-- `隐藏 N 段（M 个词）`：已转义的字符串/模板/模块说明符/import 绑定名；
-- `可隐藏位置泄露 0`：上述可隐藏位置的检查结果（应为 0，非 0 直接失败）；
-- `结构内整词可见：...`：标识符/属性名（如面板字段 `port`/`region`、运行时 API `.connect`），
-  是代码结构或面板契约，不能改名，**未计入泄露**；
-- `子串命中：...`：更长单词的一部分（如 `import` 含 `port`），**未计入泄露**；
-- `语法关键字固定保留：import / from / as`。
+- `隐藏 N 段（M 个词）`：已转义的字符串/模板/模块说明符/import 绑定名/标识符；
+- `硬性词表残留 0 处`：门禁结果（非 0 会直接失败，不会写出文件）；
+- `标识符/其它文本仍可见` / `结构内整词仍可见`：正常应完全不出现；出现即说明门禁有漏；
+- `语法关键字内子串：port×2、type×6`：唯一允许的残留（`import`/`export`/`typeof`）。
 
 词表路径可用 `CFNEW_KEYWORDS_AUTO` / `CFNEW_KEYWORDS_MANUAL` 覆盖。
 
@@ -187,6 +198,7 @@ node build-kernel.mjs --engine=builtin            # 切回默认
 混淆只动「标识符名字」和「字符串的书写方式」，不动任何值：
 
 - 属性名 / JSON 字段名（`freeCpu`、`yx`、`d`、`jk` 等）是对象键，`scope.rename` 不碰；
+  词表命中的属性名只用 Unicode 转义改书写形式（`port` → `p\u006frt`），解码后的键完全相同；
 - 路由与常量（`hello`、`/api/config`、`/api/preferred-ips`、`/region`、`/test-api`、KV 键 `c`、`c_ver`）
   都是字符串字面量，转义后解码值完全相同；
 - `import { connect as X } from "cloudflare:sockets"` 的模块说明符在发布产物里按词表转义，
@@ -203,7 +215,7 @@ node build-kernel.mjs --engine=builtin            # 切回默认
 | `deobfuscate.mjs` | **解码**：读 `_worker.pretty.js` + `names.json` + `comments.json`，做作用域安全重命名并插注释，生成 `plain/_worker.js` |
 | `obfuscate.mjs` | **内置混淆引擎**：明文 → 随机短名 + 字符串转义 + 惰性噪音。改名前记录每个引用的绑定，改名后逐个复核，任何「引用被捕获 / 被遮蔽」都会拒绝输出；`--core` 可只输出混淆核供 alpha 校验 |
 | `prepare-test-core.mjs` | 给面板测试生成等价副本：只把 import/export 模块说明符还原成原文（字符串值不变），供打桩正则使用 |
-| `keywords.mjs` | **关键词**：读取根目录 `sensitive_words_auto.txt`（硬性禁止）与 `sensitive_words_manual.txt`（期望隐藏），把字符串/模板里命中的字符转义成 `\xHH` / `\uHHHH`；`findKeywordLeaks` 供构建闸门复查 |
+| `keywords.mjs` | **关键词**：读取两个词表；字符串/模板/模块说明符按命中字符转义，标识符/属性名按「每词一个字符」做 Unicode 最小转义（解码后名字不变）；`findForbiddenKeywords` 按词法器分类出现位置，供构建闸门强制复查 |
 | `engine-javascript-obfuscator.mjs` | **可选混淆引擎**：封装 `javascript-obfuscator`（预设 light/balanced、`tools/obfuscator.config.json` 参数覆盖、危险参数拦截、import 说明符复原） |
 | `build-kernel.mjs` | **混淆工作流**：`plain/_worker.js` → `_worker.js` + `pages.zip`。builtin 引擎过 alpha/字符串值/版本/导出/噪音/单行体积六道门槛；两种引擎都过「运行时契约探针」；`--check` 只校验、`--dry-run` 只看差异；默认每次换种子，`--reuse-seed` 复用记录里的种子 |
 | `pages-zip.mjs` | 确定性 ZIP 写入/读取（固定 DOS 时间戳、零依赖）；内容不变时不重写 `pages.zip` |

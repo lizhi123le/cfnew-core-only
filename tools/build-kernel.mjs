@@ -63,7 +63,7 @@ import { JO_PRESETS, joDependencyVersion, obfuscateWithJavaScriptObfuscator } fr
 import { loadHardenParams } from './harden-config.mjs';
 import { canonicalize } from './verify-alpha.mjs';
 import {
-  findKeywordLeaks,
+  findForbiddenKeywords,
   findKeywordLeaksInModuleSpecifiers,
   hideKeywordsInCode,
   loadKeywordLists,
@@ -207,6 +207,24 @@ export async function probeRuntime({ code, version }) {
   return { coreVersion, configKeys: Object.keys(config).length, region: region.region };
 }
 
+/**
+ * 硬性词表门禁：扫描最终产物原文，除 JS 语法关键字内部的子串外，任何位置出现都算失败。
+ * 字符串/模板/标识符（含属性名）在构建阶段已分别用 `\xHH` / `\uHHHH` 转义隐藏。
+ */
+function assertKeywordGate(code, words, engine) {
+  const hits = findForbiddenKeywords(code, words);
+  if (hits.length === 0) return;
+  const detail = hits
+    .slice(0, 12)
+    .map((hit) => `  - ${hit.word} [${hit.kind}] ${JSON.stringify(hit.snippet)}`)
+    .join('\n');
+  const more = hits.length > 12 ? `\n  …还有 ${hits.length - 12} 处` : '';
+  throw new Error(
+    `硬性词表未通过（${engine} 引擎）：产物里仍有 ${hits.length} 处禁止词可见，已中止构建。\n${detail}${more}\n` +
+      '说明：字符串/模板/标识符都会自动转义；这里仍出现通常意味着正则字面量或新的语法位置需要先支持。',
+  );
+}
+
 /** 生成两份产物的内存版本；不改动磁盘。 */
 export async function buildArtifacts({
   plainSource,
@@ -250,10 +268,13 @@ export async function buildArtifacts({
         sizeRange: joSizeRange,
         oneLine,
       });
-      // 关键词隐藏（JO 引擎在所选预设之外再兜一层）：只转义命中的字符，值不变。
+      // 关键词隐藏（JO 引擎在所选预设之外再兜一层）：字符串/模板只转义命中的字符，
+      // 标识符（含属性名）只转义命中的单个字符，值/名字都不变。
       const keywordHide = hideKeywordsInCode(result.code, [...KEYWORDS.auto, ...KEYWORDS.manual], {
         includeModuleSpecifiers: true,
         includeImportIdentifiers: true,
+        includeIdentifiers: true,
+        identifierExtraBudget: 700,
         randomize: true,
         rng: mulberry32(spec.seed),
       });
@@ -390,16 +411,10 @@ export async function buildArtifacts({
 
     const ast = parse(code, { sourceType: 'module' });
     if (!hasDefaultExport(ast)) throw new Error('产物没有 default 导出，Workers/Pages 无法加载');
-    const hardLeaks = findKeywordLeaks(code, KEYWORDS.auto, { includeModuleSpecifiers: true, includeImportIdentifiers: true });
-    if (hardLeaks.length) {
-      throw new Error(
-        `产物里仍有硬性禁止词以明文出现：${hardLeaks.map((l) => l.word).join(', ')}。` +
-          '这些位置无法用字符串转义隐藏（例如模块说明符/正则/标识符），请调整词表或换 builtin 引擎。'
-      );
-    }
-    const expectedLeaks = findKeywordLeaks(code, KEYWORDS.manual, { includeModuleSpecifiers: true, includeImportIdentifiers: true });
+    assertKeywordGate(code, KEYWORDS.auto, 'javascript-obfuscator');
+    const expectedLeaks = findForbiddenKeywords(code, KEYWORDS.manual);
     if (expectedLeaks.length) {
-      console.warn(`⚠️ 期望隐藏词仍可见：${expectedLeaks.map((l) => l.word).join(', ')}`);
+      console.warn(`⚠️ 期望隐藏词仍可见：${[...new Set(expectedLeaks.map((l) => l.word))].join(', ')}`);
     }
     const moduleHits = findKeywordLeaksInModuleSpecifiers(code, KEYWORDS.auto);
     const visibility = scanKeywordVisibility(code, KEYWORDS.auto);
@@ -412,6 +427,22 @@ export async function buildArtifacts({
       .sort((a, b) => b[1] - a[1])
       .slice(0, 12);
     const exactTotal = [...visibility.exact].reduce((sum, [, count]) => sum + count, 0);
+    const keywordVisible = [...visibility.keyword]
+      .filter(([, count]) => count > 0)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 12);
+    const keywordStats = {
+      hidden: keywordHide.hidden,
+      words: keywordHide.words,
+      forbiddenTotal: 0,
+      expectedLeaks,
+      moduleHits,
+      structural,
+      exactVisible,
+      exactTotal,
+      keywordVisible,
+      syntaxWords: KEYWORDS.auto.filter((word) => JS_SYNTAX_WORDS.has(word)),
+    };
     const probe = await probeRuntime({ code, version });
 
     return {
@@ -426,6 +457,7 @@ export async function buildArtifacts({
       probe,
       selection,
       selected: selection.chosen,
+      keywords: keywordStats,
       stats: {
         engine,
         joPreset,
@@ -434,17 +466,7 @@ export async function buildArtifacts({
         joStats: result.stats,
         oneLine,
         importFingerprint: importFingerprint(code),
-        keywords: {
-          hidden: keywordHide.hidden,
-          words: keywordHide.words,
-          hardLeaks,
-          expectedLeaks,
-          moduleHits,
-          structural,
-          exactVisible,
-          exactTotal,
-          syntaxWords: KEYWORDS.auto.filter((word) => JS_SYNTAX_WORDS.has(word)),
-        },
+        keywords: keywordStats,
         targetBytes,
         coreBytes: totalBytes,
         noiseBytes: 0,
@@ -525,20 +547,15 @@ export async function buildArtifacts({
   // 门槛 5：噪音惰性
   assertInertNoise(result.noise);
 
-  // 门槛 6：关键词（auto 硬性禁止，manual 期望隐藏）
-  const hardLeaks = findKeywordLeaks(result.core, KEYWORDS.auto, { includeModuleSpecifiers: true, includeImportIdentifiers: true });
-  if (hardLeaks.length) {
-    throw new Error(
-      `产物里仍有硬性禁止词以明文出现：${hardLeaks.map((l) => l.word).join(', ')}。` +
-        '请检查 tools/keywords.mjs 的覆盖范围（正则/标识符不参与隐藏）或调整 sensitive_words_auto.txt。'
-    );
-  }
-  const expectedLeaks = findKeywordLeaks(result.core, KEYWORDS.manual, { includeModuleSpecifiers: true, includeImportIdentifiers: true });
+  // 门槛 6：关键词（auto 硬性禁止，manual 期望隐藏）。门禁扫描最终产物
+  // （混淆核 + 噪音）的原始文本，只放行 JS 语法关键字内部的子串。
+  assertKeywordGate(code, KEYWORDS.auto, engine);
+  const expectedLeaks = findForbiddenKeywords(code, KEYWORDS.manual);
   if (expectedLeaks.length) {
-    console.warn(`⚠️ 期望隐藏词仍可见：${expectedLeaks.map((l) => l.word).join(', ')}`);
+    console.warn(`⚠️ 期望隐藏词仍可见：${[...new Set(expectedLeaks.map((l) => l.word))].join(', ')}`);
   }
-  const moduleHits = findKeywordLeaksInModuleSpecifiers(result.core, KEYWORDS.auto);
-  const visibility = scanKeywordVisibility(result.core, KEYWORDS.auto);
+  const moduleHits = findKeywordLeaksInModuleSpecifiers(code, KEYWORDS.auto);
+  const visibility = scanKeywordVisibility(code, KEYWORDS.auto);
   const structural = [...visibility.structural]
     .filter(([, count]) => count > 0)
     .sort((a, b) => b[1] - a[1])
@@ -548,6 +565,10 @@ export async function buildArtifacts({
     .sort((a, b) => b[1] - a[1])
     .slice(0, 12);
   const exactTotal = [...visibility.exact].reduce((sum, [, count]) => sum + count, 0);
+  const keywordVisible = [...visibility.keyword]
+    .filter(([, count]) => count > 0)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 12);
 
   // 运行时契约探针（两种引擎共用；面板 55 项测试在 check.sh 里跑）
   const probe = await probeRuntime({ code, version: result.version });
@@ -568,12 +589,13 @@ export async function buildArtifacts({
     keywords: {
       hidden: result.stats.keywordsHidden || 0,
       words: result.stats.keywordHits || [],
-      hardLeaks,
+      forbiddenTotal: 0,
       expectedLeaks,
       moduleHits,
       structural,
       exactVisible,
       exactTotal,
+      keywordVisible,
       syntaxWords: KEYWORDS.auto.filter((word) => JS_SYNTAX_WORDS.has(word)),
     },
     stats: result.stats,
@@ -650,22 +672,23 @@ function printStats(artifacts, seedSource) {
     const k = artifacts.keywords;
     const structuralTotal = (k.structural || []).reduce((sum, [, count]) => sum + count, 0);
     console.log(
-      `   关键词：隐藏 ${k.hidden} 段（${(k.words || []).length} 个词）；可隐藏位置泄露 ${k.hardLeaks.length}；期望泄露 ${k.expectedLeaks.length}`
+      `   关键词：隐藏 ${k.hidden} 段（${(k.words || []).length} 个词）；硬性词表残留 ${k.forbiddenTotal || 0} 处；期望词残留 ${k.expectedLeaks.length} 处`
     );
     if (k.exactVisible && k.exactVisible.length) {
       const detail = k.exactVisible.map(([word, count]) => `${word}×${count}`).join('、');
-      console.log(`   结构内整词可见：约 ${k.exactTotal} 处（${detail} …；标识符/属性名，无法转义，未计入泄露）`);
+      console.log(`   ! 结构内整词仍可见：${k.exactTotal} 处（${detail}）—— 门禁本应拦截，请检查`);
     }
     if (k.structural && k.structural.length) {
       const detail = k.structural.map(([word, count]) => `${word}×${count}`).join('、');
-      console.log(
-        `   子串命中：约 ${structuralTotal} 处（${detail} …；可能是更长单词的一部分，如 import 含 port，未计入泄露）`
-      );
+      console.log(`   ! 标识符/其它文本仍可见：${structuralTotal} 处（${detail}）—— 门禁本应拦截，请检查`);
     }
-    console.log('   语法关键字固定保留：import / from / as（JS 语法，不是可隐藏字符串）');
+    if (k.keywordVisible && k.keywordVisible.length) {
+      const detail = k.keywordVisible.map(([word, count]) => `${word}×${count}`).join('、');
+      console.log(`   语法关键字内子串：${detail}（import/export/typeof 等保留字无法用转义拼写，唯一允许的残留）`);
+    }
     if (k.moduleHits && k.moduleHits.length) {
       const detail = [...new Set(k.moduleHits.map((h) => `${h.snippet}（含 ${h.word}）`))].join('、');
-      console.log(`   结构性例外：${detail} —— 模块说明符必须保持原文（cfnew-panel 测试靠它打桩）`);
+      console.log(`   ! 模块说明符仍可见：${detail} —— 发布产物应已转义，测试副本会自动还原`);
     }
 
   }

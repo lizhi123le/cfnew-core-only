@@ -8,13 +8,18 @@
  * 隐藏方式：只把**命中的关键字符**改写成 `\xHH` / `\uHHHH`，字符串值不变，
  * 比整串转义省很多体积（BPB 的 auto 词表在本内核上约 +0.8 KB）。
  *
- * 作用范围（现实约束）：
+ * 作用范围：
  *   - 字符串字面量与模板静态片段：可隐藏、可检查；
  *   - import/export 的模块说明符：发布产物同样按词表转义（如 `cloudflare:sockets`）；
  *     面板测试靠正则打桩，所以 check.sh / 运行时探针会先用 normalizeModuleSpecifiers 还原成原文；
  *   - import 的绑定名（如 `connect`）：可用 Unicode 标识符转义隐藏（`\u0063onnect`）；
- *   - 其它标识符/属性名/正则：不改写（属性名是面板接口契约），检查也不覆盖；
- *   - `import` / `from` / `as` 是 JS 语法关键字，无法转义，构建时作为「语法保留」提示。
+ *   - 任意标识符 / 属性名（含 `port`、`region`、`ech` 这类契约字段）：用 Unicode 转义改写
+ *     命中关键字的那一个字符即可（如 `p\u006frt`）。转义后的标识符在运行时仍是同一个名字，
+ *     不会改动属性键、JSON 字段名或作用域绑定；字符串值也完全不变；
+ *   - 正则字面量：不改写（改 pattern 原文可能影响 `RegExp#source` 等语义），命中即构建失败；
+ *   - `import` / `export` / `typeof` 这类 JS 语法关键字无法转义（ECMAScript 明确禁止用转义
+ *     拼出保留字），所以 `port`、`type` 仍会作为子串出现在关键字里 —— 这是唯一允许的残留，
+ *     构建门禁 `findForbiddenKeywords` 只放行被词法器判定为关键字的 token。
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -98,6 +103,76 @@ function randomEscapeUnit(code, rng, { identifier = false } = {}) {
   return `\\u{${randomHex(code, 2, rng)}}`;
 }
 
+/** 长形态转义：`\u{000070}` 这类带随机前导零的码点写法，长度 8–11，增加每次构建的形态差异。 */
+function randomEscapeUnitLong(code, rng) {
+  const digits = code.toString(16);
+  const width = Math.max(digits.length, 3 + Math.floor(rng() * 4)); // 3–6 位，允许前导零
+  let out = '\\u{';
+  for (const ch of digits.padStart(width, '0')) out += rng() < 0.5 ? ch.toUpperCase() : ch;
+  return `${out}}`;
+}
+
+/** 找出 name 里所有命中词的区间（可能重叠）。 */
+function keywordIntervals(name, words) {
+  const lower = name.toLowerCase();
+  const intervals = [];
+  for (const word of words) {
+    if (!word) continue;
+    let index = lower.indexOf(word);
+    while (index !== -1) {
+      intervals.push([index, index + word.length]);
+      index = lower.indexOf(word, index + 1);
+    }
+  }
+  return intervals.sort((a, b) => a[1] - b[1] || a[0] - b[0]);
+}
+
+/**
+ * 标识符的「最小转义」：每个命中的词里只要有一个字符变成转义，明文就消失了，
+ * 而标识符解码后仍是原名字。`port` → `p\u006frt`（+5 字节），而不是整词转义（+20 字节）。
+ * 命中区间可能重叠（如 customECHDomain 同时命中 ech 与 omain），用「区间取点」保证全覆盖。
+ */
+function planIdentifierBase(name, words, rng) {
+  const intervals = keywordIntervals(name, words);
+  if (intervals.length === 0) return null;
+  // 按右端点排序后贪心：每个尚未被覆盖的区间随机挑一个字符转义。
+  const positions = [];
+  for (const [start, end] of intervals) {
+    if (positions.some((pos) => pos >= start && pos < end)) continue;
+    positions.push(start + Math.floor(rng() * (end - start)));
+  }
+  return { positions, intervals };
+}
+
+/** 在命中区间里再随机挑 count 个尚未转义的字符（用于「随机 1–2 个」）。 */
+function pickExtraPositions(name, intervals, taken, count, rng) {
+  const pool = [];
+  for (const [start, end] of intervals) {
+    for (let i = start; i < end; i++) if (!taken.has(i) && !pool.includes(i)) pool.push(i);
+  }
+  const picked = [];
+  for (let i = 0; i < count && pool.length; i++) {
+    const index = Math.floor(rng() * pool.length);
+    picked.push(pool[index]);
+    pool.splice(index, 1);
+  }
+  return picked;
+}
+
+/** 按位置渲染标识符：转义位随机选 `\uXXXX` / `\u{HH}`，强调位再随机用长形态。 */
+function renderIdentifier(name, basePositions, extraPositions, rng) {
+  const base = new Set(basePositions);
+  const extra = new Set(extraPositions);
+  let text = '';
+  for (let i = 0; i < name.length; i++) {
+    const code = name.charCodeAt(i);
+    if (extra.has(i)) text += rng() < 0.5 ? randomEscapeUnitLong(code, rng) : randomEscapeUnit(code, rng, { identifier: true });
+    else if (base.has(i)) text += randomEscapeUnit(code, rng, { identifier: true });
+    else text += name[i];
+  }
+  return text;
+}
+
 /** 标识符里的关键词：用 Unicode 转义（`connect` → `\u0063onnect`），仍是同一个标识符。 */
 function hideIdentifierName(name, words, { randomize = false, rng = () => 0.5 } = {}) {
   const { covered, hits } = markMatches(name, words);
@@ -146,7 +221,8 @@ function hideStringLiteral(value, words, { randomize = false, rng = () => 0.5 } 
   for (let i = 0; i < value.length; i++) {
     const code = value.charCodeAt(i);
     if (covered[i]) {
-      out += escapeCodeUnit(code);
+      // 命中的字符随机用 \xHH / \uHHHH / \u{HH}，同一 seed 可复现，不同 seed 形态不同。
+      out += randomEscapeUnit(code, rng);
     } else if (code === 0x22) {
       out += '\\"';
     } else if (code === 0x5c) {
@@ -161,18 +237,23 @@ function hideStringLiteral(value, words, { randomize = false, rng = () => 0.5 } 
 }
 
 /** 模板静态片段：只改写命中的字符，保留已有的 `${...}` 表达式结构。 */
-function hideTemplateRaw(raw, words) {
+function hideTemplateRaw(raw, words, rng) {
   const { covered, hits } = markMatches(raw, words);
   if (hits.length === 0) return null;
   let out = '';
   for (let i = 0; i < raw.length; i++) {
-    out += covered[i] ? escapeCodeUnit(raw.charCodeAt(i)) : raw[i];
+    out += covered[i] ? randomEscapeUnit(raw.charCodeAt(i), rng) : raw[i];
   }
   return { text: out, hits };
 }
 
 /**
- * 隐藏一段代码里所有命中的关键词（字符串 + 模板静态片段）。
+ * 隐藏一段代码里所有命中的关键词（字符串 + 模板静态片段 + 可选标识符）。
+ *
+ * 标识符默认只做「每个词一个字符」的最小转义；`identifierExtraBudget` 是额外的字节预算，
+ * 用来随机给一部分标识符多转义 1 个字符（1–2 个随机、长短形态随机），预算用完即止，
+ * 因此产物体积有确定上界，不会因为随机而失控。
+ *
  * @returns {{ code: string, hidden: number, words: string[] }}
  */
 export function hideKeywordsInCode(
@@ -181,6 +262,8 @@ export function hideKeywordsInCode(
   {
     includeModuleSpecifiers = false,
     includeImportIdentifiers = false,
+    includeIdentifiers = false,
+    identifierExtraBudget = 0,
     randomize = false,
     rng = () => 0.5,
   } = {}
@@ -211,7 +294,7 @@ export function hideKeywordsInCode(
     TemplateElement(p) {
       const node = p.node;
       const raw = node.value.raw;
-      const hidden = hideTemplateRaw(raw, words);
+      const hidden = hideTemplateRaw(raw, words, rng);
       if (!hidden) return;
       hidden.hits.forEach((word) => {
         hitWords.add(word);
@@ -258,6 +341,24 @@ export function hideKeywordsInCode(
       });
       edits.push({ start: identifier.start, end: identifier.end, text: hidden.text });
     },
+    Identifier(p) {
+      if (!includeIdentifiers) return;
+      const node = p.node;
+      // 属性名、成员访问、绑定、引用、标签……都走这里；转义不改变解码后的名字。
+      const plan = planIdentifierBase(node.name, words, rng);
+      if (!plan) return;
+      const text = renderIdentifier(node.name, plan.positions, [], rng);
+      for (const word of new Set(markMatches(node.name, words).hits)) {
+        hitWords.add(word);
+      }
+      hitCount += plan.positions.length;
+      edits.push({
+        start: node.start,
+        end: node.end,
+        text,
+        ident: { name: node.name, base: plan.positions, intervals: plan.intervals },
+      });
+    },
   });
 
   if (edits.length === 0) return { code, hidden: 0, words: [] };
@@ -269,6 +370,25 @@ export function hideKeywordsInCode(
     seen.add(key);
     return true;
   });
+
+  // 随机加码：预算内随机挑一半左右的标识符多转义 1 个字符（总共 1–2 个），
+  // 形态随机（\uXXXX / \u{HH} / 带随机前导零的 \u{0000HH}），预算见底就停。
+  if (includeIdentifiers && identifierExtraBudget > 0) {
+    let remaining = identifierExtraBudget;
+    for (const edit of uniqueEdits) {
+      if (!edit.ident || rng() < 0.5) continue;
+      const { name, base, intervals } = edit.ident;
+      const extra = pickExtraPositions(name, intervals, new Set(base), 1, rng);
+      if (extra.length === 0) continue;
+      const text = renderIdentifier(name, base, extra, rng);
+      const delta = text.length - edit.text.length;
+      if (delta > remaining) continue;
+      remaining -= delta;
+      edit.text = text;
+      hitCount += extra.length;
+    }
+  }
+
   uniqueEdits.sort((a, b) => b.start - a.start);
   let out = code;
   for (const edit of uniqueEdits) out = out.slice(0, edit.start) + edit.text + out.slice(edit.end);
@@ -346,68 +466,95 @@ export function findKeywordLeaksInModuleSpecifiers(code, words) {
   return leaks;
 }
 
-/**
- * 统计每个关键词在产物里的可见情况：
- *   hideable   —— 落在字符串/模板/模块说明符/import 绑定名里的命中（本应被隐藏，0 才算干净）
- *   structural —— 落在标识符、属性名、JS 语法关键字里的命中（无法转义，只能如实报告）
- *
- * 这样构建日志不会再把"结构里还能看到 type/config/from"误报成"泄露 0"。
- */
-export function scanKeywordVisibility(code, words) {
-  if (!words || words.length === 0) return { hideable: new Map(), structural: new Map(), total: new Map() };
-  const ast = parseModule(code);
-  const ranges = [];
-  const addRange = (node) => {
-    if (node && Number.isInteger(node.start) && Number.isInteger(node.end)) {
-      ranges.push({ start: node.start, end: node.end });
+/** 二分找到包含 index 的 token（tokens 按 start 升序）。 */
+function tokenAt(tokens, index) {
+  let lo = 0;
+  let hi = tokens.length - 1;
+  let candidate = null;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (tokens[mid].start <= index) {
+      candidate = tokens[mid];
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
     }
-  };
-  traverse(ast, {
-    StringLiteral(p) { addRange(p.node); },
-    TemplateElement(p) { addRange(p.node); },
-    RegExpLiteral(p) { addRange(p.node); },
-    ImportSpecifier(p) { addRange(p.node.imported); addRange(p.node.local); },
-  });
-  ranges.sort((a, b) => a.start - b.start);
-  const insideHideable = (index) => {
-    // 命中起点必须落在某个可隐藏 token 内；二分找前一个 range
-    let lo = 0;
-    let hi = ranges.length - 1;
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1;
-      if (ranges[mid].start <= index) lo = mid + 1;
-      else hi = mid - 1;
-    }
-    const candidate = ranges[hi];
-    return Boolean(candidate && index >= candidate.start && index < candidate.end);
-  };
+  }
+  return candidate && index < candidate.end ? candidate : null;
+}
 
+/**
+ * 逐字扫描产物里每个关键词的所有出现位置，并用词法器给出现位置分类：
+ *   keyword    —— JS 语法关键字（`import`/`export`/`typeof`…），ECMAScript 禁止用转义拼出保留字；
+ *   string / template / regexp —— 可转义隐藏的字面量；
+ *   identifier —— 标识符 / 属性名（可用 Unicode 转义隐藏）；
+ *   comment / other —— 注释或其它文本（产物里不应出现）。
+ */
+export function scanKeywordOccurrences(code, words) {
+  if (!words || words.length === 0) return [];
+  const ast = parse(code, { sourceType: 'module', tokens: true });
+  const tokens = ast.tokens || [];
   const lower = code.toLowerCase();
-  const hideable = new Map();
-  const structural = new Map();
-  const total = new Map();
-  const exact = new Map();
-  const identifiers = [];
-  traverse(ast, {
-    Identifier(p) { identifiers.push(code.slice(p.node.start, p.node.end)); },
-  });
+  const occurrences = [];
   for (const word of words) {
     if (!word) continue;
     let index = lower.indexOf(word);
-    let all = 0;
-    let hidden = 0;
     while (index !== -1) {
-      all += 1;
-      if (insideHideable(index)) hidden += 1;
+      const token = tokenAt(tokens, index);
+      let kind;
+      if (!token) kind = 'comment';
+      else if (token.type.keyword) kind = 'keyword';
+      else if (token.type.label === 'string') kind = 'string';
+      else if (token.type.label === 'template') kind = 'template';
+      else if (token.type.label === 'regexp') kind = 'regexp';
+      else if (token.type.label === 'name') kind = 'identifier';
+      else kind = 'other';
+      occurrences.push({
+        word,
+        index,
+        kind,
+        tokenLabel: token ? token.type.keyword || token.type.label : 'raw',
+        tokenStart: token ? token.start : index,
+        tokenEnd: token ? token.end : index + word.length,
+        snippet: code.slice(Math.max(0, index - 24), index + word.length + 24),
+      });
       index = lower.indexOf(word, index + 1);
     }
-    total.set(word, all);
-    hideable.set(word, hidden);
-    structural.set(word, all - hidden);
-    exact.set(word, identifiers.filter((name) => name.toLowerCase() === word).length);
   }
-  return { hideable, structural, total, exact };
+  return occurrences;
 }
+
+/**
+ * 硬性门禁：返回所有「不是 JS 语法关键字」的关键词出现位置。
+ * 空数组 = 词表在产物里彻底不可见；只要有一处（字符串/标识符/属性名/注释）就构建失败。
+ */
+export function findForbiddenKeywords(code, words) {
+  return scanKeywordOccurrences(code, words).filter((occurrence) => occurrence.kind !== 'keyword');
+}
+
+/**
+ * 统计每个关键词在产物里的可见情况：
+ *   hideable   —— 字符串/模板/正则里的命中（本应被隐藏，0 才算干净）
+ *   structural —— 标识符/属性名/其它文本里的命中（现在会被 Unicode 转义消掉，应为 0）
+ *   keyword    —— JS 语法关键字内部的子串（无法转义，只能如实报告）
+ *   exact      —— 整个标识符恰好等于某个词（如 `port`、`region`）的出现次数
+ */
+export function scanKeywordVisibility(code, words) {
+  const empty = () => new Map();
+  const result = { hideable: empty(), structural: empty(), keyword: empty(), exact: empty(), total: empty() };
+  if (!words || words.length === 0) return result;
+  const bump = (map, word) => map.set(word, (map.get(word) || 0) + 1);
+  for (const occurrence of scanKeywordOccurrences(code, words)) {
+    const { word, kind } = occurrence;
+    bump(result.total, word);
+    if (kind === 'string' || kind === 'template' || kind === 'regexp') bump(result.hideable, word);
+    else if (kind === 'keyword') bump(result.keyword, word);
+    else bump(result.structural, word);
+    if (kind === 'identifier' && occurrence.tokenEnd - occurrence.tokenStart === word.length) bump(result.exact, word);
+  }
+  return result;
+}
+
 
 /**
  * 检查产物里是否还有关键词以明文出现（只看字符串/模板/正则的原始文本）。
