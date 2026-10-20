@@ -128,23 +128,48 @@ function keywordIntervals(name, words) {
 }
 
 /**
- * 标识符的「最小转义」：每个命中的词里只要有一个字符变成转义，明文就消失了，
- * 而标识符解码后仍是原名字。`port` → `p\u006frt`（+5 字节），而不是整词转义（+20 字节）。
+ * 在每个命中区间里挑位置：先保证每个区间至少 minCount 个字符被转义（每个词 2 个），
+ * 再按 extraChance 随机给一部分区间多转义 1 个（每个词 2–3 个）。
+ */
+function chooseIntervalPositions(intervals, minCount, rng, extraChance = 0) {
+  const positions = [];
+  const taken = new Set();
+  const countIn = (start, end) => positions.filter((pos) => pos >= start && pos < end).length;
+  const pickOne = (start, end) => {
+    const pool = [];
+    for (let i = start; i < end; i++) if (!taken.has(i)) pool.push(i);
+    if (pool.length === 0) return null;
+    const pos = pool[Math.floor(rng() * pool.length)];
+    positions.push(pos);
+    taken.add(pos);
+    return pos;
+  };
+  for (const [start, end] of intervals) {
+    while (countIn(start, end) < minCount) {
+      if (pickOne(start, end) === null) break;
+    }
+  }
+  if (extraChance > 0) {
+    for (const [start, end] of intervals) {
+      if (rng() >= extraChance) continue;
+      pickOne(start, end);
+    }
+  }
+  return positions;
+}
+
+/**
+ * 标识符的转义点：每个命中的词先挑 2 个字符，明文就消失了，而标识符解码后仍是原名字。
  * 命中区间可能重叠（如 customECHDomain 同时命中 ech 与 omain），用「区间取点」保证全覆盖。
  */
 function planIdentifierBase(name, words, rng) {
   const intervals = keywordIntervals(name, words);
   if (intervals.length === 0) return null;
-  // 按右端点排序后贪心：每个尚未被覆盖的区间随机挑一个字符转义。
-  const positions = [];
-  for (const [start, end] of intervals) {
-    if (positions.some((pos) => pos >= start && pos < end)) continue;
-    positions.push(start + Math.floor(rng() * (end - start)));
-  }
+  const positions = chooseIntervalPositions(intervals, 2, rng, 0);
   return { positions, intervals };
 }
 
-/** 在命中区间里再随机挑 count 个尚未转义的字符（用于「随机 1–2 个」）。 */
+/** 在命中区间里再随机挑 count 个尚未转义的字符（用于把每个词从 2 个加到 3 个）。 */
 function pickExtraPositions(name, intervals, taken, count, rng) {
   const pool = [];
   for (const [start, end] of intervals) {
@@ -207,9 +232,9 @@ function markMatches(text, words) {
   return { covered, hits };
 }
 
-/** 把一个字符串字面量按命中位置改写（其余字符保持可读，尽量不增大体积）。 */
+/** 把一个字符串字面量按命中位置改写（每个命中词随机转义 2–3 个字符，其余保持可读）。 */
 function hideStringLiteral(value, words, { randomize = false, rng = () => 0.5 } = {}) {
-  const { covered, hits } = markMatches(value, words);
+  const { hits } = markMatches(value, words);
   if (randomize) {
     // 说明符整体随机转义：每个字符都换一种写法，值不变。
     let randomized = '"';
@@ -217,10 +242,12 @@ function hideStringLiteral(value, words, { randomize = false, rng = () => 0.5 } 
     return { text: `${randomized}"`, hits };
   }
   if (hits.length === 0) return null;
+  const intervals = keywordIntervals(value, words);
+  const escaped = new Set(chooseIntervalPositions(intervals, 2, rng, 0.5));
   let out = '"';
   for (let i = 0; i < value.length; i++) {
     const code = value.charCodeAt(i);
-    if (covered[i]) {
+    if (escaped.has(i)) {
       // 命中的字符随机用 \xHH / \uHHHH / \u{HH}，同一 seed 可复现，不同 seed 形态不同。
       out += randomEscapeUnit(code, rng);
     } else if (code === 0x22) {
@@ -236,13 +263,15 @@ function hideStringLiteral(value, words, { randomize = false, rng = () => 0.5 } 
   return { text: `${out}"`, hits };
 }
 
-/** 模板静态片段：只改写命中的字符，保留已有的 `${...}` 表达式结构。 */
+/** 模板静态片段：每个命中词随机转义 2–3 个字符，保留已有的 `${...}` 表达式结构。 */
 function hideTemplateRaw(raw, words, rng) {
-  const { covered, hits } = markMatches(raw, words);
+  const { hits } = markMatches(raw, words);
   if (hits.length === 0) return null;
+  const intervals = keywordIntervals(raw, words);
+  const escaped = new Set(chooseIntervalPositions(intervals, 2, rng, 0.5));
   let out = '';
   for (let i = 0; i < raw.length; i++) {
-    out += covered[i] ? randomEscapeUnit(raw.charCodeAt(i), rng) : raw[i];
+    out += escaped.has(i) ? randomEscapeUnit(raw.charCodeAt(i), rng) : raw[i];
   }
   return { text: out, hits };
 }
@@ -250,8 +279,8 @@ function hideTemplateRaw(raw, words, rng) {
 /**
  * 隐藏一段代码里所有命中的关键词（字符串 + 模板静态片段 + 可选标识符）。
  *
- * 标识符默认只做「每个词一个字符」的最小转义；`identifierExtraBudget` 是额外的字节预算，
- * 用来随机给一部分标识符多转义 1 个字符（1–2 个随机、长短形态随机），预算用完即止，
+ * 每个命中词默认转义 2 个字符（字符串/模板再随机加到 3 个）；`identifierExtraBudget` 是额外的
+ * 字节预算，用来随机给一部分标识符也补到 3 个（2–3 个随机、长短形态随机），预算用完即止，
  * 因此产物体积有确定上界，不会因为随机而失控。
  *
  * @returns {{ code: string, hidden: number, words: string[] }}
@@ -371,7 +400,7 @@ export function hideKeywordsInCode(
     return true;
   });
 
-  // 随机加码：预算内随机挑一半左右的标识符多转义 1 个字符（总共 1–2 个），
+  // 随机加码：预算内随机挑一半左右的标识符多转义 1 个字符（总共 2–3 个），
   // 形态随机（\uXXXX / \u{HH} / 带随机前导零的 \u{0000HH}），预算见底就停。
   if (includeIdentifiers && identifierExtraBudget > 0) {
     let remaining = identifierExtraBudget;

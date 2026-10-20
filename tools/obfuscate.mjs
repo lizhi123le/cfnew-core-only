@@ -813,7 +813,7 @@ export function obfuscate({
     includeIdentifiers: true,
     // 额外 700 字节预算：随机挑一部分标识符多转义 1 个字符（1–2 个随机），形态也随机。
     // 有上界，保证不会把产物体积撑破 harden.config.json 的上限。
-    identifierExtraBudget: 700,
+    identifierExtraBudget: 400,
     randomize: true,
     rng,
   });

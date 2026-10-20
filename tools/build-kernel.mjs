@@ -274,7 +274,7 @@ export async function buildArtifacts({
         includeModuleSpecifiers: true,
         includeImportIdentifiers: true,
         includeIdentifiers: true,
-        identifierExtraBudget: 700,
+        identifierExtraBudget: 400,
         randomize: true,
         rng: mulberry32(spec.seed),
       });

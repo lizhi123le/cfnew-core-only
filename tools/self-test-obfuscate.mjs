@@ -187,7 +187,7 @@ ok(IMPORT_PATTERN.test(joBalanced.code), 'balanced 预设同样保留 import 原
 ok(jo.options.renameProperties === false, '强制 renameProperties=false（保护面板 JSON 字段名）');
 
 console.log('== 10. 体积预算与单行格式 ==');
-const budgetOpts = { plainSource, prettySource, names, seed, mangle: 'all', escape: 'budget', targetBytes: 41900, noiseBytes: 4096 };
+const budgetOpts = { plainSource, prettySource, names, seed, mangle: 'all', escape: 'budget', targetBytes: 42000, noiseBytes: 4096 };
 const budget = obfuscate(budgetOpts);
 const budgetBytes = Buffer.byteLength(budget.code);
 ok(!budget.code.includes('\n'), '产物体内没有换行（保持原有单行格式）');
@@ -265,7 +265,7 @@ ok([...visibility.keyword.values()].reduce((sum, n) => sum + n, 0) > 0, '语法�
 ok(findForbiddenKeywords(budget.code, keywordLists.auto).length === 0, '最终产物通过硬性词表门禁');
 ok(findForbiddenKeywords(base.code, keywordLists.auto).length === 0, 'escape=all 产物通过硬性词表门禁');
 
-// 标识符最小转义：只改一个字符，解码后名字与属性键完全不变。
+// 标识符转义：每个词转 2–3 个字符，解码后名字与属性键完全不变。
 const identSrc = 'const port=1;const region="x";const o={port,region};function f(port){return port+o.region;}';
 const identHidden = hideKeywordsInCode(identSrc, ['port', 'region'], { includeIdentifiers: true });
 ok(!/port|region/i.test(identHidden.code), '标识符/属性名里的 port、region 已不可见');
@@ -275,7 +275,7 @@ traverse(identBack, {
   Identifier(p) { backNames.push(p.node.name); },
 });
 ok(backNames.includes('port') && backNames.includes('region'), '转义后标识符解码仍是 port / region（语义不变）');
-ok(identHidden.code.length - identSrc.length < 60, `最小转义只增加 ${identHidden.code.length - identSrc.length} 字节`);
+ok(identHidden.code.length - identSrc.length < 160, `每个词 2 个字符起步只增加 ${identHidden.code.length - identSrc.length} 字节`);
 
 // 随机加码：同一份源码，不同种子下转义的位置/形态不同，但解码后的名字不变。
 const manySrc = 'const port=1,region=2,ech=3,alpn=4,hostname="h",address="a",connect=5,toString=6;';
@@ -400,8 +400,8 @@ const baseBuild = {
   targetBytes: 39500,
   sizeRange: { min: 32000, max: 42000 },
 };
-const tight = await buildArtifacts({ ...baseBuild, harden: hardenFor({ kind: 'bytes', value: 41700 }, 4) });
-ok(Buffer.byteLength(tight.code) <= 41700, `预算搜索把产物压到 ${Buffer.byteLength(tight.code)} ≤ 41700 字节`);
+const tight = await buildArtifacts({ ...baseBuild, harden: hardenFor({ kind: 'bytes', value: 42000 }, 4) });
+ok(Buffer.byteLength(tight.code) <= 42000, `预算搜索把产物压到 ${Buffer.byteLength(tight.code)} ≤ 42000 字节`);
 ok(
   tight.selection.configured && tight.selection.runs >= 1 && tight.selection.runs <= 4,
   `搜索次数 ${tight.selection.runs} 不超过 maxRuns=4`,
