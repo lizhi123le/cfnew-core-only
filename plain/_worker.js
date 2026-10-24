@@ -1741,9 +1741,10 @@ function createRequestHandler(A) {
     };
     try {
       const a = await readGrpcFrames(e, n);
-      /*读头失败（UUID/长度/地址解析）统一 400，异常 500，与完整版内核一致。*/
-      if (typeof a == "string") return releaseSlot(), new Response("Bad Request", {
-        status: 400
+      /*读头失败（UUID/长度/地址解析）统一 502，异常 500：沿用 core-only 的发布契约，
+        面板（byJoey 版断言 502、本仓版接受 400/502）都兼容；完整版内核此处为 400。*/
+      if (typeof a == "string") return releaseSlot(), new Response("Bad Gateway", {
+        status: 502
       });
       if (typeof a != "object" || !a) return releaseSlot(), new Response("Internal Server Error", {
         status: 500
