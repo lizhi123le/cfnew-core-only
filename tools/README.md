@@ -52,8 +52,8 @@ _worker.pretty.js ──deobfuscate──▶ plain/_worker.js ──obfuscate─
 | `--randomize` | 开关（build-kernel） | — | 强制换新种子；**写模式默认已经如此**，保留它是为了脚本里显式表达 |
 | `--mangle` | `all` / `mapped` / `upstream` | `all` | builtin 引擎：`all` 换全部绑定；`mapped` 只换解码参数覆盖的 102 个声明；`upstream` 还原上游短名 |
 | `--escape` | `budget` / `all` / `partial` / `none` | `budget` | builtin 引擎：`budget` 按体积目标分配转义；`all/partial/none` 为显式控制（不保证体积区间） |
-| `--target-size` | 20000..200000 | `39500` | budget 模式的目标体积（内容字节数）；落在 37±5 KB 区间 |
-| `--size-min` / `--size-max` | 整数 | `32000` / `42000` | budget 模式允许的体积区间，越界直接构建失败 |
+| `--target-size` | 20000..200000 | `39500` | budget 模式的目标体积（内容字节数）；落在 32–44 KB 区间 |
+| `--size-min` / `--size-max` | 整数 | `32000` / `44000` | budget 模式允许的体积区间，越界直接构建失败 |
 | `--target-bytes` | 体积写法（见下） | 配置文件/不限制 | `_worker.js` 原始字节**上限预算**；`0` 关闭 |
 | `--target-zip` | 体积写法（见下） | 配置文件/不限制 | `pages.zip`（DEFLATE）字节**上限预算**；`0` 关闭 |
 | `--max-runs` | 正整数 | `1` | 体积预算搜索最多渲染几次（配置文件里通常写 20） |
@@ -86,10 +86,10 @@ _worker.pretty.js ──deobfuscate──▶ plain/_worker.js ──obfuscate─
 
 - 首次产物超出预算时，按 `maxRuns` 依次尝试更保守的参数（先关噪音，再降转义强度，最后换种子），
   一达标就停；全部失败则构建失败并报告最后一组大小；
-- 配置了任一体积预算后，不再套用默认的 32–42 KB 区间；`0` 则完全不检查该上限；
+- 配置了任一体积预算后，不再套用默认的 32–44 KB 区间；`0` 则完全不检查该上限；
 - `oneLine: false`（或 `--one-line=false`）输出多行，体积不再受默认区间约束；
-- 当前仓库的 `522k` / `232k` 远大于本内核约 39 KB 的产物，所以日常构建不会被这两个预算改变；
-  想压缩体积时，把预算设在约 39.2–39.5 KB 之间（低于混淆核本身的 39,242 B 不可能达成），或写一个
+- 当前仓库的 `522k` / `232k` 远大于本内核约 43 KB 的产物，所以日常构建不会被这两个预算改变；
+  想压缩体积时，把预算设在约 43.7–44 KB 之间（低于混淆核本身的 43,773 B 不可能达成），或写一个
   略低于 100% 的百分比，例如 `99.5%`。
 
 
@@ -165,16 +165,15 @@ node build-kernel.mjs --engine=builtin            # 切回默认
   写法随机选 `\xHH` / `\uHHHH` / `\u{HH}`，十六进制大小写也随机（`type` → `\x74\u0079pe`）；
 - 标识符 / 属性名（`port`、`region`、`ech`、`alpn`、`match`、`config`…）：每个命中词先转义 2 个字符
   （`port` → `p\u006f\u0072t`），再用 400 字节预算随机给约一半标识符补第 3 个；转义形态随机选
-  `\uXXXX` / `\u{HH}` / 带随机前导零的 `\u{0000HH}`，十六进制大小写也随机。ECMAScript 解码后
+  `\uXXXX` / `\u{HH}`，十六进制大小写也随机。ECMAScript 解码后
   仍是同一个标识符，属性键、JSON 字段名、作用域绑定都不变。随机加码有确定字节上界，不会撑破预算。
 
 > 注：JS 只有十六进制转义（`\xHH` / `\uHHHH` / `\u{...}`），没有二进制字面量，所以“二进制转换”
-> 无法直接写进源码；这里用「前导零位数 + 十六进制大小写 + 三种转义形态」来提供等价的形态随机性。
+> 无法直接写进源码；这里用「十六进制大小写 + 三种转义形态」来提供等价的形态随机性。
 
 范围：字符串字面量、模板静态片段、import/export 模块说明符、import 绑定名、所有标识符/属性名、噪音块。
 发布产物会把 `cloudflare:sockets` 的说明符和 `connect` 绑定名**按种子随机转义**：
-说明符里每个字符随机用 `\xHH` / `\uHHHH` / `\u{HH}`（十六进制大小写也随机），
-绑定名随机用 `\uXXXX` / `\u{XX}`；不同种子形态不同、同一 seed 可复现。
+说明符先整段逐字符写成 `\xHH` / `\uHHHH`，再随机抽 2–3 个改成 `\u{HH}`；绑定名同样整段转义、其中 2–3 个为 `\u{HH}`。不同种子形态不同、同一 seed 可复现。
 构建日志会打印 `import 形态指纹`：每次新种子都会变；`--check` / `--reuse-seed` 复用种子时保持不变。面板测试用正则打桩，因此 `check.sh` 先用
 `tools/prepare-test-core.mjs` 生成「只还原这些语法书写形式」的等价副本，再跑测试；
 `build-kernel` 的运行时探针也会自动还原。
@@ -214,7 +213,7 @@ node build-kernel.mjs --engine=builtin            # 切回默认
 | `deobfuscate.mjs` | **解码**：读 `_worker.pretty.js` + `names.json` + `comments.json`，做作用域安全重命名并插注释，生成 `plain/_worker.js` |
 | `obfuscate.mjs` | **内置混淆引擎**：明文 → 随机短名 + 字符串转义 + 惰性噪音。改名前记录每个引用的绑定，改名后逐个复核，任何「引用被捕获 / 被遮蔽」都会拒绝输出；`--core` 可只输出混淆核供 alpha 校验 |
 | `prepare-test-core.mjs` | 给面板测试生成等价副本：只把 import/export 模块说明符还原成原文（字符串值不变），供打桩正则使用 |
-| `keywords.mjs` | **关键词**：读取两个词表；字符串/模板/模块说明符按命中字符转义，标识符/属性名按「每词一个字符」做 Unicode 最小转义（解码后名字不变）；`findForbiddenKeywords` 按词法器分类出现位置，供构建闸门强制复查 |
+| `keywords.mjs` | **关键词**：读取两个词表；字符串/模板/标识符按「每词 2–3 个字符」转义，模块说明符/import 绑定名整段逐字符转义后抽 2–3 个用 `\u{...}` 长形态（解码后名字不变）；`findForbiddenKeywords` 按词法器分类出现位置，供构建闸门强制复查 |
 | `engine-javascript-obfuscator.mjs` | **可选混淆引擎**：封装 `javascript-obfuscator`（预设 light/balanced、`tools/obfuscator.config.json` 参数覆盖、危险参数拦截、import 说明符复原） |
 | `build-kernel.mjs` | **混淆工作流**：`plain/_worker.js` → `_worker.js` + `pages.zip`。builtin 引擎过 alpha/字符串值/版本/导出/噪音/单行体积六道门槛；两种引擎都过「运行时契约探针」；`--check` 只校验、`--dry-run` 只看差异；默认每次换种子，`--reuse-seed` 复用记录里的种子 |
 | `pages-zip.mjs` | 确定性 ZIP 写入/读取（固定 DOS 时间戳、零依赖）；内容不变时不重写 `pages.zip` |

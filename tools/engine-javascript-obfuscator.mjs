@@ -227,7 +227,7 @@ export function obfuscateWithJavaScriptObfuscator({
   seed,
   preset = 'auto',
   targetBytes = 39500,
-  sizeRange = { min: 32000, max: 42000 },
+  sizeRange = { min: 32000, max: 44000 },
   oneLine = true,
   overrides = {},
   configPath,

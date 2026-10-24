@@ -246,7 +246,7 @@ export async function buildArtifacts({
   const oneLine = harden ? harden.oneLine : true;
   const provided = harden ? harden.provided : {};
   const sizeSearchEnabled = Boolean(provided.targetBytes || provided.targetZipBytes);
-  const legacySizeGate = !sizeSearchEnabled && oneLine; // 多行格式不再强求 32..42 KB
+  const legacySizeGate = !sizeSearchEnabled && oneLine; // 多行格式不再强求 32..44 KB
   const maxRuns = sizeSearchEnabled ? Math.max(1, harden.maxRuns) : 1;
   const joSizeRange = legacySizeGate ? sizeRange : null;
 
@@ -724,7 +724,7 @@ function resolveSizeRange({ opts, env, record = null }) {
   const read = (key, fallback) =>
     Number(opts.get(key) ?? env[`CFNEW_${key.toUpperCase().replace(/-/g, '_')}`] ?? fallback);
   const min = read('size-min', record?.sizeMin ?? 32000);
-  const max = read('size-max', record?.sizeMax ?? 42000);
+  const max = read('size-max', record?.sizeMax ?? 44000);
   if (!Number.isInteger(min) || !Number.isInteger(max) || min <= 0 || min >= max) {
     throw new Error(`--size-min/--size-max 不合法：${min}..${max}`);
   }

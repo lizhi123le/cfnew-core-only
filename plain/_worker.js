@@ -1356,7 +1356,7 @@ function createRequestHandler(A) {
   }
   let de = 0;
   const at = 128 * 1024,
-    st = 45e3,
+    st = 30e3,
     gn = 32,
     bn = [13, 23, 28, 28, 28, 28, 28, 28, 28, 24, 30, 28, 28, 30, 28, 28, 28, 28, 28, 28, 28, 28, 30, 28, 28, 28, 28, 28, 28, 28, 28, 28, 6, 10, 10, 12, 13, 6, 8, 11, 10, 10, 8, 11, 8, 6, 6, 6, 5, 5, 5, 6, 6, 6, 6, 6, 6, 6, 7, 8, 15, 6, 12, 10, 13, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 8, 7, 8, 13, 19, 13, 14, 6, 15, 5, 6, 5, 6, 5, 6, 6, 6, 5, 7, 7, 6, 6, 6, 5, 6, 7, 6, 5, 5, 6, 7, 7, 7, 7, 7, 15, 11, 14, 13, 28, 20, 22, 20, 20, 22, 22, 22, 23, 22, 23, 23, 23, 23, 23, 24, 23, 24, 24, 22, 23, 24, 23, 23, 23, 23, 21, 22, 23, 22, 23, 23, 24, 22, 21, 20, 22, 22, 23, 23, 21, 23, 22, 22, 24, 21, 22, 23, 23, 21, 21, 22, 21, 23, 22, 23, 23, 20, 22, 22, 22, 23, 22, 22, 23, 26, 26, 20, 19, 22, 23, 22, 25, 26, 26, 26, 27, 27, 26, 24, 25, 19, 21, 26, 27, 27, 26, 27, 24, 21, 21, 26, 26, 28, 27, 27, 27, 20, 24, 20, 21, 22, 21, 21, 23, 22, 22, 25, 25, 24, 24, 26, 23, 26, 27, 26, 26, 27, 27, 27, 27, 27, 28, 27, 27, 27, 27, 27, 26, 30];
   /*从 UUID 推导 XHTTP 短路径的字段与参数名。*/
@@ -1448,38 +1448,65 @@ function createRequestHandler(A) {
   function allocateBytes(e) {
     return new Uint8Array(new ArrayBuffer(e || at));
   }
+  /*隐私增强：智能剥离随机填充前缀（0xED7F 魔数 + 长度 + 填充），与 WS 路径一致。*/
+  const PRIVACY_MAGIC = 0xED7F;
+  /*不是隐私客户端（无魔数 / 长度异常）时原样返回，保证旧客户端行为不变。*/
+  function stripPrivacyPadding(e) {
+    if (!e || e.byteLength < 4) return e;
+    const n = (e[0] << 8) | e[1];
+    if (n !== PRIVACY_MAGIC) return e;
+    const t = (e[2] << 8) | e[3];
+    if (t < 64 || t > 2048) return e;
+    return e.subarray(4 + t);
+  }
   /*读取 gRPC 帧（HTTP/2 stream-one）。*/
   async function readGrpcFrames(e, n) {
     const t = e.getReader({
       mode: "byob"
     });
     try {
-      let r = await t.readAtLeast(18, allocateBytes());
+      /*兼容层：readAtLeast 为较新 API，运行时缺失时回退到 read，避免整个请求 502。*/
+      const readAtLeastOrRead = (min, buf) => typeof t.readAtLeast == "function" ? t.readAtLeast(min, buf) : t.read(buf);
+      let r = await readAtLeastOrRead(18, allocateBytes());
       v.consume(r.value?.byteLength || 0);
-      let o = 0,
-        a = 0,
-        s = r.value;
-      o += r.value.length;
+      let a = 0,
+        o = 0,
+        raw = r.value || new Uint8Array(0),
+        done = r.done,
+        s = stripPrivacyPadding(raw);
+      o = s.length;
+      /*首包可能带魔数 + 随机填充：不足 18 字节继续读，并对完整原始缓冲幂等重剥离。*/
+      while (o < 18 && !done) {
+        r = await readAtLeastOrRead(18, allocateBytes()), v.consume(r.value?.byteLength || 0), done = r.done;
+        if (!r.value || r.value.length === 0) break;
+        raw = concatArrays(raw, r.value), s = stripPrivacyPadding(raw), o = s.length;
+      }
+      if (o < 18) return "header too short";
+      /*按需读满 target 字节（read 回退可能短读，因此循环累积）。*/
+      const readUntil = async target => {
+        while (o < target && !done) {
+          const q = await readAtLeastOrRead(target - o, allocateBytes());
+          v.consume(q.value?.byteLength || 0), done = q.done;
+          if (!q.value || q.value.length === 0) break;
+          s = concatArrays(s, q.value), o = s.length;
+        }
+      };
       const u = s[0],
         f = s.slice(1, 17),
         i = hexToBytes(n);
       if (!timingSafeEqual(f, i)) return "invalid UUID";
       const h = s[17],
         l = 18 + h + 1 + 2 + 1;
-      if (l + 1 > o) {
-        if (r.done) return "header too short";
-        a = l + 1 - o, r = await t.readAtLeast(a, allocateBytes()), v.consume(r.value?.byteLength || 0), o += r.value.length, s = concatArrays(s, r.value);
-      }
+      await readUntil(l + 1);
+      if (o < l + 1) return "header too short";
       const c = s[18 + h];
-      if (c !== 1) return `unsupported command: ${c}`;
+      if (c !== 1 && c !== 2) return `unsupported command: ${c}`;
       const d = (s[l - 1 - 2] << 8) + s[l - 1 - 1],
         p = s[l - 1];
       let g = -1;
       if (p === xe ? g = l + 4 : p === Ee ? g = l + 16 : p === ue && (g = l + 1 + s[l]), g < 0) return "read address type failed";
-      if (a = g - o, a > 0) {
-        if (r.done) return "read address failed";
-        r = await t.readAtLeast(a, allocateBytes()), v.consume(r.value?.byteLength || 0), o += r.value.length, s = concatArrays(s, r.value);
-      }
+      await readUntil(g);
+      if (o < g) return "read address failed";
       let w = "";
       switch (a = l, p) {
         case xe:
@@ -1498,9 +1525,10 @@ function createRequestHandler(A) {
         hostname: w,
         port: d,
         data: U,
+        isUDP: c === 2,
         resp: new Uint8Array([u, 0]),
         reader: t,
-        done: r.done
+        done
       };
     } catch (r) {
       try {
@@ -1512,13 +1540,14 @@ function createRequestHandler(A) {
   /*把 ReadableStream 写入 WritableStream。*/
   async function writeStreamToWriter(e, n, t) {
     async function writeChunked(o) {
-      if (!(!o || o.length === 0)) {
-        e.add(o.length);
-        try {
-          await n.write(o);
-        } catch (a) {
-          throw a;
-        }
+      /*上行同样剥离魔数 + 随机填充（无魔数时原样返回，旧客户端不受影响）。*/
+      o = stripPrivacyPadding(o);
+      if (!o || o.length === 0) return;
+      e.add(o.length), e.lastActivity = Date.now();
+      try {
+        await n.write(o);
+      } catch (a) {
+        throw a;
       }
     }
     try {
@@ -1527,7 +1556,7 @@ function createRequestHandler(A) {
       for (; !t.done;) {
         const a = await t.reader.read(allocateBytes());
         if (a.done) break;
-        v.consume(a.value?.byteLength || 0), await writeChunked(a.value), t.done = a.done, o++, !v.enabled && o % 10 === 0 && (await sleep(0)), (!a.value || a.value.length === 0) && (await sleep(2));
+        v.consume(a.value?.byteLength || 0), await writeChunked(a.value), t.done = a.done, o++, o % 10 === 0 && (await sleep(0)), (!a.value || a.value.length === 0) && (await sleep(2));
       }
     } catch (o) {
       throw o;
@@ -1565,10 +1594,10 @@ function createRequestHandler(A) {
     const s = new Promise((u, f) => {
       r = new TransformStream({
         start(d) {
-          t.add(e.length), d.enqueue(e);
+          t.add(e.length), t.lastActivity = Date.now(), d.enqueue(e);
         },
         transform(d, p) {
-          t.add(d.length), p.enqueue(d);
+          t.add(d.length), t.lastActivity = Date.now(), p.enqueue(d);
         },
         cancel(d) {
           f(`download cancelled: ${d}`);
@@ -1655,11 +1684,11 @@ function createRequestHandler(A) {
     };
   }
   /*解析实际连接目标：ProxyIP / 优选地址 / 自定义域名。*/
-  async function resolveDestination(e, n = null) {
+  async function resolveDestination(e, n = null, proxyConfig = null) {
     const t = e.hostname,
       r = e.port,
       connectDirect = async (f, i) => raceConnect(f, i, n, Ze),
-      connectViaProxy = async (f, i) => dialProxy(ue, f, i, ne, n, null),
+      connectViaProxy = async (f, i) => dialProxy(ue, f, i, proxyConfig || ne, n, null),
       resolvePreferredAddress = async () => {
         if (N && N.trim()) {
           const i = parseHostPort(N);
@@ -1701,7 +1730,7 @@ function createRequestHandler(A) {
     }
   }
   /*连接数上限保护，超过返回 429。*/
-  async function limitConcurrency(e, n, t = null) {
+  async function limitConcurrency(e, n, t = null, proxyConfig = null) {
     if (de >= gn) return new Response("Too many connections", {
       status: 429
     });
@@ -1712,9 +1741,40 @@ function createRequestHandler(A) {
     };
     try {
       const a = await readGrpcFrames(e, n);
-      if (typeof a != "object" || !a) return null;
-      const s = await resolveDestination(a, t);
-      if (s === null) return null;
+      /*读头失败（UUID/长度/地址解析）统一 400，异常 500，与完整版内核一致。*/
+      if (typeof a == "string") return releaseSlot(), new Response("Bad Request", {
+        status: 400
+      });
+      if (typeof a != "object" || !a) return releaseSlot(), new Response("Internal Server Error", {
+        status: 500
+      });
+      if (a.isUDP) {
+        if (a.port !== 53) return releaseSlot(), new Response("Bad Request", {
+          status: 400
+        });
+        return startXhttpUdp(a, releaseSlot);
+      }
+      const s = await resolveDestination(a, t, proxyConfig);
+      if (s === null) return releaseSlot(), new Response("Internal Server Error", {
+        status: 500
+      });
+      /*空闲超时：任一方有数据就刷新最后活动时间，只有真正空闲才断开（不再绝对 45 秒强杀）。*/
+      const lastActive = () => Math.max(s.uploader.counter.lastActivity || 0, s.downloader.counter.lastActivity || 0);
+      s.uploader.counter.lastActivity = s.downloader.counter.lastActivity = Date.now();
+      const idleTimer = setInterval(() => {
+        if (Date.now() - lastActive() > st) {
+          try {
+            s.close();
+          } catch {}
+          try {
+            s.downloader.finish();
+          } catch {}
+          try {
+            s.uploader.abort();
+          } catch {}
+          clearInterval(idleTimer), releaseSlot();
+        }
+      }, 8e3);
       const u = Promise.race([(async () => {
         try {
           await s.downloader.done;
@@ -1723,7 +1783,8 @@ function createRequestHandler(A) {
         try {
           await s.uploader.done;
         } catch {}
-      })(), sleep(st).then(() => {})]).finally(() => {
+      })()]).finally(() => {
+        clearInterval(idleTimer);
         try {
           s.close();
         } catch {}
@@ -1740,13 +1801,59 @@ function createRequestHandler(A) {
         closed: u
       };
     } catch {
-      return releaseSlot(), null;
+      return releaseSlot(), new Response("Internal Server Error", {
+        status: 500
+      });
     }
   }
+  /*XHTTP UDP（仅 DNS:53）：把数据报转成 DNS over TCP 查询，回灌长度前缀流。*/
+  function startXhttpUdp(e, releaseSlot) {
+    let c = null;
+    const s = new ReadableStream({
+      start(n) {
+        c = n;
+      }
+    });
+    const mock = {
+      readyState: 1,
+      send(n) {
+        try {
+          c.enqueue(n);
+        } catch {}
+      },
+      close() {
+        try {
+          c.close();
+        } catch {}
+      }
+    };
+    const done = (async () => {
+      try {
+        let resp = e.resp;
+        if (e.data && e.data.byteLength > 0) await dnsOverHttpsQuery(e.data, mock, resp, null), resp = null;
+        let count = 0;
+        for (; !e.done;) {
+          if (++count % 20 === 0) await sleep(0);
+          const n = await e.reader.read();
+          if (n.done) break;
+          if (n.value && n.value.byteLength > 0) await dnsOverHttpsQuery(n.value, mock, resp, null), resp = null;
+        }
+      } catch {} finally {
+        try {
+          mock.close();
+        } catch {}
+        releaseSlot();
+      }
+    })();
+    return {
+      readable: s,
+      closed: done
+    };
+  }
   /*带上限的 fetch（XHTTP 转发）。*/
-  async function fetchWithLimit(e) {
+  async function fetchWithLimit(e, proxyConfig = null) {
     try {
-      return await limitConcurrency(e.body, k, e.fetcher);
+      return await limitConcurrency(e.body, k, e.fetcher, proxyConfig);
     } catch {
       return null;
     }
@@ -2144,17 +2251,27 @@ function createRequestHandler(A) {
       if (!hasValidXhttpLength(e, i, h)) return new Response("Bad Request", {
         status: 400
       });
-      const l = await fetchWithLimit(e);
+      /*每请求代理参数 ?s=（反代 / SOCKS5），与完整版内核行为一致。*/
+      let 请求代理配置 = null;
+      try {
+        const 代理串 = r.searchParams.get("s") || "";
+        if (代理串) 请求代理配置 = parseOutboundSpec(代理串);
+      } catch {}
+      const l = await fetchWithLimit(e, 请求代理配置);
+      /*429 / 400 / 500 等直接透出，避免把 Response 当成连接对象。*/
+      if (l instanceof Response) return l;
       if (!l) return new Response("Internal Server Error", {
         status: 502
       });
-      t.waitUntil(l.closed.catch(() => {}));
+      t.waitUntil(l.closed);
       const c = new URL("https://x.invalid/");
       return c.searchParams.set(h, randomAlphaNumeric(100 + Math.floor(Math.random() * 901))), new Response(l.readable, {
         headers: {
           "X-Accel-Buffering": "no",
           "Cache-Control": "no-store",
-          "Content-Type": "application/grpc",
+          Connection: "keep-alive",
+          "User-Agent": "Go-http-client/2.0",
+          "Content-Type": "application/octet-stream",
           [i]: c.toString()
         }
       });

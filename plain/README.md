@@ -115,11 +115,11 @@ node --test src/test/*.test.mjs      # 混淆产物同样 55 / 55
 - 协议解析类函数的命名是按语义推断的（作者原始源码未公开），例如 `parseVlessHeader`、`dialSocks5`、
   `pipeWithFreeGuard` 都是还原时的命名，不是上游原名。
 - 字符串转义按体积预算分配：默认 `escape=budget` / `target-size=39500`，先隐藏路由与配置字段，
-  剩余预算分给随机字符串和噪音；产物固定单行并落在 32–42 KB（当前 39,432 字节）。
+  剩余预算分给随机字符串和噪音；产物固定单行并落在 32–44 KB（当前 43,773 字节）。
   想更小用 `--target-size=38000`，想显式控制用 `--escape=partial|none`（不再保证体积区间）。
 - 噪音是几段未引用的函数声明，加载时不执行，与正文拼在同一行；不需要时 `--noise=0`。
 - 关键词隐藏覆盖字符串/模板、模块说明符与 import 绑定名（`sensitive_words_auto/manual.txt`）；
-  `cloudflare:sockets` 和 `connect` 绑定在发布产物里会按种子**随机转义**（每次形态不同、同 seed 可复现），
+  `cloudflare:sockets` 和 `connect` 绑定在发布产物里会按种子**整段逐字符转义**（先全部写成 `\xHH` / `\uHHHH`，再随机抽 2–3 个改成 `\u{HH}` 形态；不同 seed 可复现），
   `check.sh`/运行时探针用等价副本还原后打桩。
   `import`/`from`/`as` 是 JS 语法，无法转义；标识符/属性名（面板字段 `port`、`region`、运行时 `.connect`）
   也不能改名，构建日志会把它们作为「结构内整词可见」如实报告，而不是算作 0 泄露。

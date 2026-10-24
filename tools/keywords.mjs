@@ -14,7 +14,7 @@
  *     面板测试靠正则打桩，所以 check.sh / 运行时探针会先用 normalizeModuleSpecifiers 还原成原文；
  *   - import 的绑定名（如 `connect`）：可用 Unicode 标识符转义隐藏（`\u0063onnect`）；
  *   - 任意标识符 / 属性名（含 `port`、`region`、`ech` 这类契约字段）：用 Unicode 转义改写
- *     命中关键字的那一个字符即可（如 `p\u006frt`）。转义后的标识符在运行时仍是同一个名字，
+ *     命中关键字的其中一个或两个字符即可（如 `p\u006frt`）；每个命中词随机转义 2–3 个字符。转义后的标识符在运行时仍是同一个名字，
  *     不会改动属性键、JSON 字段名或作用域绑定；字符串值也完全不变；
  *   - 正则字面量：不改写（改 pattern 原文可能影响 `RegExp#source` 等语义），命中即构建失败；
  *   - `import` / `export` / `typeof` 这类 JS 语法关键字无法转义（ECMAScript 明确禁止用转义
@@ -103,13 +103,16 @@ function randomEscapeUnit(code, rng, { identifier = false } = {}) {
   return `\\u{${randomHex(code, 2, rng)}}`;
 }
 
-/** 长形态转义：`\u{000070}` 这类带随机前导零的码点写法，长度 8–11，增加每次构建的形态差异。 */
-function randomEscapeUnitLong(code, rng) {
-  const digits = code.toString(16);
-  const width = Math.max(digits.length, 3 + Math.floor(rng() * 4)); // 3–6 位，允许前导零
-  let out = '\\u{';
-  for (const ch of digits.padStart(width, '0')) out += rng() < 0.5 ? ch.toUpperCase() : ch;
-  return `${out}}`;
+/** `\u{HH}` 形态：按实际码位宽度写十六进制（不补前导零），十六进制大小写随机。 */
+function randomEscapeUnitBraced(code, rng) {
+  const width = Math.max(2, code.toString(16).length);
+  return `\\u{${randomHex(code, width, rng)}}`;
+}
+
+/** 短形态转义：`\xHH`（字符串）或 `\uHHHH`（标识符），不含 `\u{...}` 长形态。 */
+function randomShortEscapeUnit(code, rng, { identifier = false } = {}) {
+  if (!identifier && code <= 0xff && rng() < 0.5) return `\\x${randomHex(code, 2, rng)}`;
+  return `\\u${randomHex(code, 4, rng)}`;
 }
 
 /** 找出 name 里所有命中词的区间（可能重叠）。 */
@@ -159,6 +162,20 @@ function chooseIntervalPositions(intervals, minCount, rng, extraChance = 0) {
 }
 
 /**
+ * 随机挑 2–3 个位置：用于没有命中词、但仍需打散形态的模块说明符 / import 绑定。
+ * 与命中词的处理保持一致（每个词 2–3 个字符，而不是整段转义）。
+ */
+function randomPositions(length, rng) {
+  const count = 2 + (rng() < 0.5 ? 1 : 0);
+  const pool = Array.from({ length }, (_, i) => i);
+  const picked = [];
+  for (let i = 0; i < count && pool.length > 0; i += 1) {
+    picked.push(pool.splice(Math.floor(rng() * pool.length), 1)[0]);
+  }
+  return picked.sort((a, b) => a - b);
+}
+
+/**
  * 标识符的转义点：每个命中的词先挑 2 个字符，明文就消失了，而标识符解码后仍是原名字。
  * 命中区间可能重叠（如 customECHDomain 同时命中 ech 与 omain），用「区间取点」保证全覆盖。
  */
@@ -184,14 +201,14 @@ function pickExtraPositions(name, intervals, taken, count, rng) {
   return picked;
 }
 
-/** 按位置渲染标识符：转义位随机选 `\uXXXX` / `\u{HH}`，强调位再随机用长形态。 */
+/** 按位置渲染标识符：转义位随机选 `\uXXXX` / `\u{HH}`，强调位固定用 `\u{HH}`。 */
 function renderIdentifier(name, basePositions, extraPositions, rng) {
   const base = new Set(basePositions);
   const extra = new Set(extraPositions);
   let text = '';
   for (let i = 0; i < name.length; i++) {
     const code = name.charCodeAt(i);
-    if (extra.has(i)) text += rng() < 0.5 ? randomEscapeUnitLong(code, rng) : randomEscapeUnit(code, rng, { identifier: true });
+    if (extra.has(i)) text += randomEscapeUnitBraced(code, rng);
     else if (base.has(i)) text += randomEscapeUnit(code, rng, { identifier: true });
     else text += name[i];
   }
@@ -202,11 +219,9 @@ function renderIdentifier(name, basePositions, extraPositions, rng) {
 function hideIdentifierName(name, words, { randomize = false, rng = () => 0.5 } = {}) {
   const { covered, hits } = markMatches(name, words);
   if (randomize) {
-    let randomized = '';
-    for (let i = 0; i < name.length; i++) {
-      randomized += randomEscapeUnit(name.charCodeAt(i), rng, { identifier: true });
-    }
-    return { text: randomized, hits };
+    // 先整段逐字符转成 \uXXXX，再从中随机抽 2–3 个改写成 \u{...} 长形态。
+    const all = Array.from({ length: name.length }, (_, i) => i);
+    return { text: renderIdentifier(name, all, randomPositions(name.length, rng), rng), hits };
   }
   if (hits.length === 0) return null;
   let out = '';
@@ -235,21 +250,26 @@ function markMatches(text, words) {
 /** 把一个字符串字面量按命中位置改写（每个命中词随机转义 2–3 个字符，其余保持可读）。 */
 function hideStringLiteral(value, words, { randomize = false, rng = () => 0.5 } = {}) {
   const { hits } = markMatches(value, words);
+  const escaped = new Set();
+  const braced = new Set();
   if (randomize) {
-    // 说明符整体随机转义：每个字符都换一种写法，值不变。
-    let randomized = '"';
-    for (let i = 0; i < value.length; i++) randomized += randomEscapeUnit(value.charCodeAt(i), rng);
-    return { text: `${randomized}"`, hits };
+    // 模块说明符：先整段逐字符转成 \xHH / \uHHHH，再随机抽 2–3 个改写成 \u{HH} 形态。
+    for (let i = 0; i < value.length; i += 1) escaped.add(i);
+    for (const pos of randomPositions(value.length, rng)) braced.add(pos);
+  } else {
+    if (hits.length === 0) return null;
+    const intervals = keywordIntervals(value, words);
+    for (const pos of chooseIntervalPositions(intervals, 2, rng, 0.5)) escaped.add(pos);
   }
-  if (hits.length === 0) return null;
-  const intervals = keywordIntervals(value, words);
-  const escaped = new Set(chooseIntervalPositions(intervals, 2, rng, 0.5));
   let out = '"';
   for (let i = 0; i < value.length; i++) {
     const code = value.charCodeAt(i);
-    if (escaped.has(i)) {
-      // 命中的字符随机用 \xHH / \uHHHH / \u{HH}，同一 seed 可复现，不同 seed 形态不同。
-      out += randomEscapeUnit(code, rng);
+    if (braced.has(i)) {
+      // 抽中的 2–3 个字符用 \u{HH} 形态（不补前导零，十六进制大小写随机）。
+      out += randomEscapeUnitBraced(code, rng);
+    } else if (escaped.has(i)) {
+      // 其余命中字符随机用 \xHH / \uHHHH，同一 seed 可复现，不同 seed 形态不同。
+      out += randomize ? randomShortEscapeUnit(code, rng) : randomEscapeUnit(code, rng);
     } else if (code === 0x22) {
       out += '\\"';
     } else if (code === 0x5c) {
